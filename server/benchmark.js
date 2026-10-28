@@ -9,8 +9,10 @@ import { createGameServer } from './app.js';
 
 const directory = await mkdtemp(path.join(tmpdir(), 'stackfriends-benchmark-'));
 const clients = [];
+const clientCount = Number(process.argv.find((argument) => argument.startsWith('--clients='))?.split('=')[1] || 2);
 let game;
 try {
+  if (!Number.isInteger(clientCount) || clientCount < 2 || clientCount > 16) throw new Error('Bitte 2 bis 16 Testspieler wählen.');
   game = await createGameServer({ config: { mode: 'local', worldFile: path.join(directory, 'world.json'), secureCookie: false }, rng: () => 0.1 });
   await new Promise((resolve) => game.server.listen(0, '127.0.0.1', resolve));
   const address = `http://127.0.0.1:${game.server.address().port}`;
@@ -43,13 +45,14 @@ try {
     return { socket, session, send, wait, command };
   };
   const first = await online('Messung A');
-  for (const name of ['Messung B', 'Messung C', 'Messung D']) await online(name);
+  for (let index = 1; index < clientCount; index++) await online(`Messung ${index + 1}`);
   await delay(50);
 
   const counters = () => ({
     applicationMessagesSent: game.metrics.messagesSent, applicationBytesSent: game.metrics.bytesSent,
     applicationMessagesReceived: game.metrics.messagesReceived, applicationBytesReceived: game.metrics.bytesReceived,
     databaseReads: game.service.repository.metrics.reads, databaseWrites: game.service.repository.metrics.writes,
+    databaseReadBytes: game.service.repository.metrics.readBytes, databaseWriteBytes: game.service.repository.metrics.writeBytes,
     dragPreviews: game.service.realtime.metrics.dragPreviews,
   });
   const measure = async (action) => {
@@ -64,7 +67,7 @@ try {
       processCpuMicroseconds: process.cpuUsage(cpu),
     };
   };
-  const idle = await measure(() => delay(1_000));
+  const idle = await measure(() => delay(6_100));
   const humanId = first.session.player.cardId;
   const dragging = await measure(async () => {
     const reserved = first.wait((message) => message.type === 'lock' && message.cardId === humanId);
@@ -89,8 +92,8 @@ try {
   await delay(20);
   const working = await measure(() => first.wait((message) => message.type === 'patch' && message.upsert.some((card) => card.type === 'wood')));
   console.log(JSON.stringify({
-    clients: 4, storage: 'isolated local file',
-    notes: 'Application payload counters exclude WebSocket control frames. CPU includes the server and four test clients in this process. Atlas/Redis/Vercel runtime consumption must be measured in the deployed environment.',
+    clients: clientCount, storage: 'isolated local file',
+    notes: 'Application payload counters exclude native WebSocket ping/pong frames. Database bytes describe the local file adapter, not MongoDB wire traffic. CPU includes the server and test clients. Atlas/Redis/Vercel runtime consumption must be measured in the deployed environment.',
     idle, dragging, working,
   }, null, 2));
 } finally {

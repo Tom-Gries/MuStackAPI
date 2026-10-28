@@ -1,5 +1,5 @@
 {
-  "sourceCommit": "b3af7825d4bc83833817d1f11a3618f384fb3c4c",
+  "sourceCommit": "3b4c5fb0c0abe8416eed080184c2adfa81e77492",
   "application": "backend",
   "repository": "https://github.com/Tom-Gries/MuStackAPI",
   "files": [
@@ -31,7 +31,10 @@
     "tests/game.test.js",
     "tests/group-combat.test.js",
     "tests/rat-teams.test.js",
+    "tests/realtime.test.js",
+    "tests/repository.test.js",
     "tests/server.test.js",
+    "tests/service-traffic.test.js",
     "tests/socket-tickets.test.js"
   ]
 }

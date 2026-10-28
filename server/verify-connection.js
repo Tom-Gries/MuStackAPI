@@ -38,9 +38,6 @@ try {
     // ws automatically answers these control frames, just as a browser does.
     socket.on('ping', () => client.nativePings++);
     socket.on('close', () => { if (!cleanup && !client.expectedClose) client.unexpectedCloses++; });
-    client.heartbeat = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
-    }, 5_000);
     await ready;
     return client;
   };
@@ -67,11 +64,11 @@ try {
   for (const client of clients) {
     assert.equal(client.unexpectedCloses, 0);
     assert.equal(client.errors, 0);
-    assert.ok(client.nativePings >= 10 && client.applicationPongs >= 10, 'Beide Heartbeat-Wege wurden ausreichend lange geprüft.');
+    assert.ok(client.nativePings >= 10, 'Der native WebSocket-Heartbeat wurde ausreichend lange geprüft.');
+    assert.equal(client.applicationPongs, 0, 'Ein zusätzlicher JSON-Heartbeat ist nicht erforderlich.');
   }
   clients[0].expectedClose = true;
   clients[0].socket.close();
-  clearInterval(clients[0].heartbeat);
   await delay(5_500);
   assert.equal((await game.service.realtime.online()).players.length, 1, 'Schließen eines Tabs darf den anderen nicht abmelden.');
   assert.equal(clients[1].socket.readyState, WebSocket.OPEN);
@@ -89,7 +86,7 @@ try {
   process.exitCode = 1;
 } finally {
   cleanup = true;
-  for (const client of clients) { clearInterval(client.heartbeat); client.socket.terminate(); }
+  for (const client of clients) client.socket.terminate();
   if (game) await game.close();
   if (path.dirname(directory) === path.resolve(tmpdir()) && path.basename(directory).startsWith('stackfriends-connection-')) await rm(directory, { recursive: true, force: true });
 }

@@ -29,3 +29,9 @@ npm run check
 ```
 
 shared/ enthält die gemeinsamen Spielregeln als lokales npm-Workspace-Paket. Sitzungen bleiben HttpOnly-Cookies der Spielseite; einmal verwendbare, 30 Sekunden gültige Tickets authentifizieren direkte WebSockets. Redis teilt Tickets, Ereignisse und Anwesenheit zwischen API-Instanzen.
+
+## Datenverkehr
+
+MongoDB speichert atomare Feldänderungen mit Revisionsprüfung. Neue Karten und Aktionskennungen werden kompakt angehängt; größere Array-Strukturänderungen ersetzen nur das betroffene Array. Mutationen lesen den aktuellen Weltstand für sichere parallele Änderungen. Authentifizierung und Terminplanung verwenden gezielte Projektionen. Redis-Anwesenheit nutzt atomare, gecachte Lua-Befehle. Native WebSocket-Ping/Pong-Nachrichten reichen als regelmäßiges Lebenszeichen.
+
+Die Modelltests in tests/repository.test.js vergleichen eine Bewegung bei 1.000 Karten und 2.000 Aktionen: 219 Byte JSON-Schreibnutzdaten statt 186.860 Byte für das vollständige Dokument. Echte MongoDB-/Redis-Cloudmessungen stehen noch aus. Lokaler Zwei-Spieler-Benchmark: `node server/benchmark.js --clients=2`. Verbindungstest mit zwei Tabs über 75 Sekunden: `node server/verify-connection.js`. Beide nutzen isolierte lokale Testwelten.

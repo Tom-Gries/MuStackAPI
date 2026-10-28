@@ -22,6 +22,43 @@ const CONSUME_TICKET_SCRIPT = `
   if value then redis.call('DEL', KEYS[1]) end
   return value
 `;
+const PRESENCE_SCRIPTS = {
+  stackfriendsPresenceTouch: `
+    redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+    redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
+    return 1
+  `,
+  stackfriendsPresenceRemove: `
+    redis.call('ZREM', KEYS[1], ARGV[1])
+    redis.call('HDEL', KEYS[2], ARGV[1])
+    return 1
+  `,
+  stackfriendsPresenceRead: `
+    local now = tonumber(ARGV[1])
+    local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now)
+    for _,id in ipairs(expired) do redis.call('HDEL', KEYS[2], id) end
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+    local active = redis.call('ZRANGEBYSCORE', KEYS[1], now + 1, '+inf', 'WITHSCORES')
+    local reply = {0}
+    local seen = {}
+    for i = 1,#active,2 do
+      local raw = redis.call('HGET', KEYS[2], active[i])
+      local valid, player = false, nil
+      if raw then valid, player = pcall(cjson.decode, raw) end
+      if valid and type(player) == 'table' and type(player.id) == 'string' and type(player.name) == 'string' then
+        reply[1] = math.max(reply[1], tonumber(active[i + 1]))
+        if not seen[player.id] then
+          seen[player.id] = true
+          reply[#reply + 1] = cjson.encode({id = player.id, name = player.name})
+        end
+      else
+        redis.call('ZREM', KEYS[1], active[i])
+        redis.call('HDEL', KEYS[2], active[i])
+      end
+    end
+    return reply
+  `,
+};
 const SOCKET_TICKET_TTL = 30_000;
 
 export class Realtime extends EventEmitter {
@@ -35,7 +72,7 @@ export class Realtime extends EventEmitter {
     this.locks = new Map();
     this.socketTickets = new Map();
     this.closed = false;
-    this.metrics = { publications: 0, dragPreviews: 0, publicationBytes: 0 };
+    this.metrics = { publications: 0, dragPreviews: 0, publicationBytes: 0, presenceReads: 0, presenceWrites: 0 };
   }
 
   async init() {
@@ -105,30 +142,41 @@ export class Realtime extends EventEmitter {
     const entry = { connectionId, id: player.id, name: player.name, expiresAt };
     this.presence.set(connectionId, entry);
     if (this.redis) {
-      await this.redis.multi()
-        .zadd(`${this.prefix}presence`, expiresAt, connectionId)
-        .hset(`${this.prefix}people`, connectionId, JSON.stringify(entry))
-        .exec();
+      // Keep expiresAt for API instances from the previous deployment; the
+      // new atomic reader uses the sorted-set score as its source of truth.
+      await this.presenceCommand('stackfriendsPresenceTouch', expiresAt, connectionId, JSON.stringify({ id: player.id, name: player.name, expiresAt }));
+      this.metrics.presenceWrites++;
     }
     return expiresAt;
   }
 
   async remove(connectionId) {
     this.presence.delete(connectionId);
-    if (this.redis) await this.redis.multi().zrem(`${this.prefix}presence`, connectionId).hdel(`${this.prefix}people`, connectionId).exec();
+    if (this.redis) {
+      await this.presenceCommand('stackfriendsPresenceRemove', connectionId);
+      this.metrics.presenceWrites++;
+    }
     await this.releaseOwner(connectionId);
+  }
+
+  presenceCommand(name, ...args) {
+    if (typeof this.redis[name] !== 'function') {
+      // ioredis caches the script per connection and uses EVALSHA after the
+      // first call, including recovery after Redis clears its script cache.
+      this.redis.defineCommand(name, { numberOfKeys: 2, lua: PRESENCE_SCRIPTS[name] });
+    }
+    return this.redis[name](`${this.prefix}presence`, `${this.prefix}people`, ...args);
   }
 
   async online() {
     const now = this.now();
     let entries;
     if (this.redis) {
-      const expired = await this.redis.zrangebyscore(`${this.prefix}presence`, '-inf', now);
-      if (expired.length) {
-        await this.redis.multi().zrem(`${this.prefix}presence`, ...expired).hdel(`${this.prefix}people`, ...expired).exec();
-      }
-      const ids = await this.redis.zrangebyscore(`${this.prefix}presence`, now + 1, '+inf');
-      entries = ids.length ? (await this.redis.hmget(`${this.prefix}people`, ...ids)).filter(Boolean).map(JSON.parse) : [];
+      // Expiry cleanup and the snapshot are one atomic operation: another
+      // instance cannot refresh a connection between the scan and deletion.
+      const [activeUntil, ...players] = await this.presenceCommand('stackfriendsPresenceRead', now);
+      this.metrics.presenceReads++;
+      return { players: players.map(JSON.parse), activeUntil: Number(activeUntil) };
     } else {
       for (const [id, entry] of this.presence) if (entry.expiresAt <= now) this.presence.delete(id);
       entries = [...this.presence.values()];

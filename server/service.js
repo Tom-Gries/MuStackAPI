@@ -53,6 +53,8 @@ export class GameService extends EventEmitter {
     this.realtime = options.realtime;
     this.leases = new Map();
     this.leaseTimers = new Map();
+    this.eventWorlds = new WeakMap();
+    this.latestScheduledRevision = -1;
     this.timer = null;
     this.closed = false;
     this.metrics = { acceptedCommands: 0, duplicateCommands: 0, scheduledEvents: 0 };
@@ -63,7 +65,10 @@ export class GameService extends EventEmitter {
     this.realtime ||= await new Realtime(this.config, this.now).init();
     this.realtime.on('event', (event) => {
       this.emit('event', event);
-      if (event.type === 'patch') this.schedule().catch((error) => this.emit('fault', error));
+      if (event.type === 'patch' && event.revision >= this.latestScheduledRevision) {
+        this.latestScheduledRevision = event.revision;
+        this.schedule(this.eventWorlds.get(event)).catch((error) => this.emit('fault', error));
+      }
     });
     this.realtime.on('resync', () => this.emit('resync'));
     this.realtime.on('unavailable', () => this.emit('unavailable'));
@@ -74,7 +79,12 @@ export class GameService extends EventEmitter {
     const result = await this.repository.mutate(change);
     if (result.changed) {
       const online = await this.realtime.online().catch(() => ({ players: [] }));
-      await this.realtime.publish({ ...makePatch(result.before, result.world), serverTime: this.now(), mode: this.config.mode, online: online.players });
+      const event = { ...makePatch(result.before, result.world), serverTime: this.now(), mode: this.config.mode, online: online.players };
+      // Local scheduling can reuse this exact commit. Foreign events still read
+      // MongoDB, and an older publication cannot replace a newer timer.
+      this.eventWorlds.set(event, result.world);
+      try { await this.realtime.publish(event); }
+      finally { this.eventWorlds.delete(event); }
     }
     return result;
   }
@@ -86,16 +96,23 @@ export class GameService extends EventEmitter {
 
   async snapshot(token, reconcile = true) {
     const presence = await this.realtime.online();
+    let world;
+    let player;
     if (reconcile) {
-      await this.commit((state) => {
+      const result = await this.commit((state) => {
         const changed = this.advance(state, this.now(), presence.activeUntil);
         if (changed) state.activeUntil = presence.activeUntil || Math.min(this.now(), state.activeUntil || 0);
-        return { changed };
+        return { changed, value: playerFromSession(state, hashToken(token)) };
       });
+      world = result.world;
+      player = result.result;
+    } else {
+      const state = await this.repository.read();
+      world = state.world;
+      player = playerFromSession(state, hashToken(token));
     }
-    const state = await this.repository.read();
     return {
-      player: playerFromSession(state, hashToken(token)), world: publicWorld(state.world),
+      player, world: publicWorld(world),
       mode: this.config.mode, serverTime: this.now(), online: presence.players,
     };
   }
@@ -123,8 +140,7 @@ export class GameService extends EventEmitter {
   }
 
   async authenticate(token) {
-    const state = await this.repository.read();
-    const player = playerFromSession(state, hashToken(token));
+    const player = await this.repository.playerForSession(hashToken(token));
     if (!player) throw errorWithStatus('Bitte gib zuerst deinen Namen ein.', 401);
     return player;
   }
@@ -133,13 +149,13 @@ export class GameService extends EventEmitter {
     const previous = await this.realtime.online();
     const now = this.now();
     // Reconcile the paused interval BEFORE the new connection starts world time.
-    await this.commit((state) => {
+    const result = await this.commit((state) => {
       this.advance(state, now, previous.activeUntil);
       state.activeUntil = Math.max(previous.activeUntil, now + 15_000);
     });
     await this.realtime.touch(connectionId, player);
     await this.publishPresence();
-    await this.schedule();
+    await this.schedule(result.world);
   }
 
   async disconnect(connectionId, lastPresenceUntil = 0) {
@@ -172,7 +188,7 @@ export class GameService extends EventEmitter {
     const commandLimit = command.type === 'catalog-save' ? 256 * 1024 - 1024 : 24 * 1024;
     if (Buffer.byteLength(JSON.stringify(command), 'utf8') > commandLimit) throw errorWithStatus(command.type === 'catalog-save' ? 'Die Einstellungen sind zu groß. Bitte verwende weniger Einträge oder kürzere Texte.' : 'Die Spielaktion ist zu groß.', 413);
     const hash = hashToken(token);
-    const state = await this.repository.read();
+    const state = await this.repository.commandContext(hash);
     const player = playerFromSession(state, hash);
     if (!player) throw errorWithStatus('Bitte gib zuerst deinen Namen ein.', 401);
     const owner = connectionId || `http-${randomUUID()}`;
@@ -217,15 +233,15 @@ export class GameService extends EventEmitter {
 
   async dragStart(connectionId, player, cardId, split = false, takeAbove = false) {
     if (typeof cardId !== 'string' || cardId.length > 100) throw errorWithStatus('Ungültige Karte.');
-    const state = await this.repository.read();
-    const card = state.world.cards.find((entry) => entry.id === cardId);
+    const world = await this.repository.world();
+    const card = world.cards.find((entry) => entry.id === cardId);
     if (!card || card.type === 'rat') throw errorWithStatus('Diese Karte kann nicht bewegt werden.');
-    const group = state.world.cards.filter((entry) => entry.stackId === card.stackId);
+    const group = world.cards.filter((entry) => entry.stackId === card.stackId);
     const selected = card.equippedTo ? [card] : takeAbove
       ? group.filter((entry) => !entry.equippedTo && entry.order >= card.order)
       : split ? [card] : group.filter((entry) => !entry.equippedTo);
     const selectedIds = new Set(selected.map((entry) => entry.id));
-    const cardIds = state.world.cards.filter((entry) => selectedIds.has(entry.id) || (!card.equippedTo && selectedIds.has(entry.equippedTo))).map((entry) => entry.id);
+    const cardIds = world.cards.filter((entry) => selectedIds.has(entry.id) || (!card.equippedTo && selectedIds.has(entry.equippedTo))).map((entry) => entry.id);
     if (selected.some((entry) => entry.type === 'rat')) throw errorWithStatus('Ratten bewegen sich selbst. Greife eine Karte oberhalb der Ratte.');
     const ids = takeAbove ? cardIds : group.map((entry) => entry.id);
     if (!(await this.realtime.acquire(ids, connectionId, player.id))) throw errorWithStatus('Diesen Stapel bewegt gerade jemand anderes.', 409);
@@ -273,15 +289,19 @@ export class GameService extends EventEmitter {
     this.leaseTimers.set(cardId, timer);
   }
 
-  async schedule() {
+  async schedule(knownWorld) {
+    if (knownWorld && knownWorld.revision < this.latestScheduledRevision) return;
     clearTimeout(this.timer);
     const generation = this.scheduleGeneration = (this.scheduleGeneration || 0) + 1;
     if (this.closed) return;
     const online = await this.realtime.online();
     if (generation !== this.scheduleGeneration || this.closed) return;
     if (!online.players.length) return;
-    const state = await this.repository.read();
-    const wake = nextWakeAt(state.world, this.now());
+    const world = knownWorld || await this.repository.world();
+    if (generation !== this.scheduleGeneration || this.closed) return;
+    if (world.revision < this.latestScheduledRevision) return;
+    this.latestScheduledRevision = world.revision;
+    const wake = nextWakeAt(world, this.now());
     if (generation !== this.scheduleGeneration || this.closed) return;
     if (wake == null || !Number.isFinite(wake)) return;
     const delay = Math.max(20, Math.min(wake - this.now(), 2_147_000_000));
@@ -293,19 +313,19 @@ export class GameService extends EventEmitter {
     if (this.closed) return;
     const online = await this.realtime.online();
     if (!online.players.length) return;
-    const state = await this.repository.read();
-    if (!(await this.realtime.claimEvent(state.world.revision))) {
+    const revision = await this.repository.revision();
+    if (!(await this.realtime.claimEvent(revision))) {
       this.timer = setTimeout(() => this.runScheduled().catch((error) => this.emit('fault', error)), 5_050);
       this.timer.unref?.();
       return;
     }
-    await this.commit((draft) => {
+    const result = await this.commit((draft) => {
       const changed = this.advance(draft, this.now(), online.activeUntil);
       if (changed) draft.activeUntil = online.activeUntil;
       return { changed };
     });
     this.metrics.scheduledEvents++;
-    await this.schedule();
+    if (!result.changed) await this.schedule(result.world);
   }
 
   async close() {
