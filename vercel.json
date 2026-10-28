@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "functions": {
+    "api/socket.js": { "maxDuration": 300 }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/socket" },
+    { "source": "/", "destination": "/api/socket" }
+  ]
+}
