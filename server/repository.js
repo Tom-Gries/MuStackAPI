@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { MongoClient } from 'mongodb';
 import { createWorld } from '@stackfriends/shared/game.js';
 
-function storageError() {
-  return Object.assign(new Error('Der Weltstand konnte nicht mit MongoDB abgeglichen werden. Bitte Verbindung und Datenbankrechte prüfen.'), { status: 503 });
+function storageError(cause) {
+  return Object.assign(new Error('Der Weltstand konnte nicht mit MongoDB abgeglichen werden. Bitte Verbindung und Datenbankrechte prüfen.', { cause }), { status: 503 });
 }
 
 function initialState(now) {
@@ -261,7 +261,7 @@ export async function createRepository(config, now) {
       : new FileRepository(config.worldFile, now);
     return await repository.init();
   } catch (error) {
-    if (config.mongoUri) throw storageError();
+    if (config.mongoUri) throw storageError(error);
     throw error;
   }
 }
