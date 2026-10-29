@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate as flush } from 'node:timers/promises';
-import { createWorld } from '../shared/game.js';
+import { createWorld } from '@stackfriends/shared/game.js';
 import { FileRepository } from '../server/repository.js';
 import { Realtime } from '../server/realtime.js';
 import { GameService } from '../server/service.js';

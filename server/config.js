@@ -7,23 +7,17 @@ export const MAX_COMMANDS = 2_000;
 
 export function resolveMongoUri(env) {
   if (!env.MONGODB_URI) return undefined;
-  let uri = env.MONGODB_URI.trim();
-  const placeholders = [
-    [/<(?:db_)?username>|\{username\}|\$\{MONGODB_USERNAME\}/gi, env.MONGODB_USERNAME],
-    [/<(?:db_)?password>|\{password\}|\$\{MONGODB_PASSWORD\}/gi, env.MONGODB_PASSWORD],
-  ];
-  for (const [pattern, value] of placeholders) {
-    if (!pattern.test(uri)) continue;
-    if (!value) throw new Error('Die MongoDB-Adresse enthält einen Platzhalter ohne zugehörige Zugangsdaten.');
-    pattern.lastIndex = 0;
-    uri = uri.replace(pattern, () => encodeURIComponent(value));
-  }
-  return uri;
+  const uri = env.MONGODB_URI.trim();
+  if (/[<>{}]/.test(uri)) throw new Error('MONGODB_URI enthält Platzhalter. Bitte eine vollständige MongoDB-Verbindungsadresse verwenden.');
+  return uri || undefined;
 }
 
 export function readConfig(env = process.env) {
-  const cloud = env.VERCEL === '1' || Boolean(env.MONGODB_URI);
-  if (env.VERCEL === '1' && (!env.MONGODB_URI || !env.REDIS_URL)) {
+  const mongoUri = resolveMongoUri(env);
+  const redisUrl = env.REDIS_URL?.trim() || undefined;
+  const mongoDatabase = env.MONGODB_DB?.trim() || 'StackFriends-dev';
+  const cloud = env.VERCEL === '1' || Boolean(mongoUri);
+  if (env.VERCEL === '1' && (!mongoUri || !redisUrl)) {
     throw new Error('Für den Cloudbetrieb sind MONGODB_URI und REDIS_URL erforderlich. Lokaler Dateispeicher ist auf Vercel deaktiviert.');
   }
   let socketOrigin;
@@ -36,14 +30,14 @@ export function readConfig(env = process.env) {
   }
   return {
     mode: cloud ? 'cloud' : 'local',
-    mongoUri: resolveMongoUri(env),
-    mongoDatabase: env.MONGODB_DB || env.MONGODB_DATABASE || 'StackFriends-dev',
-    redisUrl: env.REDIS_URL,
-    redisNamespace: env.REDIS_NAMESPACE || `stackfriends:${env.MONGODB_DB || env.MONGODB_DATABASE || 'StackFriends-dev'}`,
+    mongoUri,
+    mongoDatabase,
+    redisUrl,
+    redisNamespace: `stackfriends:${mongoDatabase}`,
     worldFile: env.WORLD_FILE || fileURLToPath(new URL('../.data/world.json', import.meta.url)),
     port: Number(env.PORT || 3001),
-    secureCookie: env.VERCEL === '1' || env.COOKIE_SECURE === 'true',
-    publicOrigin: env.APP_ORIGIN || env.PUBLIC_ORIGIN,
+    secureCookie: env.VERCEL === '1',
+    publicOrigin: env.APP_ORIGIN,
     socketOrigin,
   };
 }

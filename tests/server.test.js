@@ -60,13 +60,22 @@ async function connect(address, cookie) {
 
 test('cloud config requires persistent services on Vercel; MongoDB can be tried locally', () => {
   assert.throws(() => readConfig({ VERCEL: '1' }), /MONGODB_URI und REDIS_URL/);
+  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: 'mongodb://localhost:27017' }), /MONGODB_URI und REDIS_URL/);
+  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: ' ', REDIS_URL: 'redis://localhost:6379' }), /MONGODB_URI und REDIS_URL/);
   const config = readConfig({ MONGODB_URI: 'mongodb://localhost:27017', MONGODB_DB: 'test_world', APP_ORIGIN: 'https://example.test' });
   assert.equal(config.mongoDatabase, 'test_world');
+  assert.equal(config.redisNamespace, 'stackfriends:test_world');
   assert.equal(config.publicOrigin, 'https://example.test');
   assert.equal(config.redisUrl, undefined);
   assert.equal(readConfig({}).mongoDatabase, 'StackFriends-dev');
-  assert.equal(resolveMongoUri({ MONGODB_URI: 'mongodb+srv://<username>:<db_password>@example.test/', MONGODB_USERNAME: 'a@b', MONGODB_PASSWORD: 'x:y/z' }), 'mongodb+srv://a%40b:x%3Ay%2Fz@example.test/');
-  assert.throws(() => resolveMongoUri({ MONGODB_URI: 'mongodb+srv://<username>:<password>@example.test/' }), /Platzhalter/);
+  const encoded = 'mongodb+srv://a%40b:x%3Ay%2Fz@example.test/';
+  assert.equal(resolveMongoUri({ MONGODB_URI: ` ${encoded} ` }), encoded);
+  for (const credentials of ['<username>:<db_password>', '{username}:{password}', '${MONGODB_USERNAME}:${MONGODB_PASSWORD}']) {
+    assert.throws(() => resolveMongoUri({ MONGODB_URI: `mongodb+srv://${credentials}@example.test/` }), /Platzhalter/);
+  }
+  const production = readConfig({ VERCEL: '1', MONGODB_URI: encoded, REDIS_URL: 'redis://localhost:6379', APP_ORIGIN: 'https://example.test' });
+  assert.equal(production.secureCookie, true);
+  assert.equal(readConfig({}).secureCookie, false);
 });
 
 test('concurrent joins create one human per normalized name, one starting gold pile, and an HttpOnly session', async (t) => {

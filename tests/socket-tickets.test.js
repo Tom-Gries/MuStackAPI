@@ -128,15 +128,18 @@ test('closing a socket or the server cancels its pending ticket preparation', as
   const joined = await f.join();
   let issued = 0;
   t.mock.method(f.game.service.realtime, 'issueSocketTicket', async () => { issued++; return 'unused'; });
+  // Keep the deadline pending while the real socket handshake completes, even
+  // when the host is busy; advance it only after each connection has closed.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const connected = await socketState(t, f.address, { cookie: joined.cookie });
   const closed = new Promise((resolve) => connected.socket.once('close', resolve));
   connected.socket.close();
   await closed;
-  await delay(140);
+  t.mock.timers.tick(140);
   assert.equal(issued, 0);
   await socketState(t, f.address, { cookie: joined.cookie });
   await f.close();
-  await delay(140);
+  t.mock.timers.tick(140);
   assert.equal(issued, 0);
 });
 

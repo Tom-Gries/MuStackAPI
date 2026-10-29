@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MongoRepository, FileRepository } from '../server/repository.js';
-import { createWorld } from '../shared/game.js';
+import { createWorld } from '@stackfriends/shared/game.js';
 
 const hash = 'a'.repeat(64);
 const get = (value, location) => location.split('.').reduce((parent, key) => parent?.[key], value);

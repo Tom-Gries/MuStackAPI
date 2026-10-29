@@ -202,18 +202,6 @@ export class Realtime extends EventEmitter {
     return true;
   }
 
-  async owns(cardIds, connectionId, playerId) {
-    const owner = `${connectionId}|${playerId}`;
-    if (this.redis) {
-      const values = await this.redis.mget(...cardIds.map((id) => `${this.prefix}lock:${id}`));
-      return values.every((value) => value === owner);
-    }
-    return cardIds.every((id) => {
-      const lock = this.locks.get(id);
-      return lock?.owner === owner && lock.expiresAt > this.now();
-    });
-  }
-
   async release(cardIds, connectionId, playerId) {
     const owner = `${connectionId}|${playerId}`;
     if (this.redis && cardIds.length) await this.redis.eval(RELEASE_SCRIPT, cardIds.length, ...cardIds.map((id) => `${this.prefix}lock:${id}`), owner);
