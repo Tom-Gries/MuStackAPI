@@ -59,7 +59,7 @@ const PRESENCE_SCRIPTS = {
     return reply
   `,
 };
-const SOCKET_TICKET_TTL = 30_000;
+export const SOCKET_TICKET_TTL = 30_000;
 
 export class Realtime extends EventEmitter {
   constructor(config, now = Date.now) {

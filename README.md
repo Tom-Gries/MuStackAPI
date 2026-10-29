@@ -35,3 +35,9 @@ shared/ enthält die gemeinsamen Spielregeln als lokales npm-Workspace-Paket. Si
 MongoDB speichert atomare Feldänderungen mit Revisionsprüfung. Neue Karten und Aktionskennungen werden kompakt angehängt; größere Array-Strukturänderungen ersetzen nur das betroffene Array. Mutationen lesen den aktuellen Weltstand für sichere parallele Änderungen. Authentifizierung und Terminplanung verwenden gezielte Projektionen. Redis-Anwesenheit nutzt atomare, gecachte Lua-Befehle. Native WebSocket-Ping/Pong-Nachrichten reichen als regelmäßiges Lebenszeichen.
 
 Die Modelltests in tests/repository.test.js vergleichen eine Bewegung bei 1.000 Karten und 2.000 Aktionen: 219 Byte JSON-Schreibnutzdaten statt 186.860 Byte für das vollständige Dokument. Echte MongoDB-/Redis-Cloudmessungen stehen noch aus. Lokaler Zwei-Spieler-Benchmark: `node server/benchmark.js --clients=2`. Verbindungstest mit zwei Tabs über 75 Sekunden: `node server/verify-connection.js`. Beide nutzen isolierte lokale Testwelten.
+
+## Verbindungszeit sparen
+
+Hintergrund-Tabs trennen sich nach 30 Sekunden; ein serverseitiger Termin sichert dies auch bei gedrosselten Browser-Timern ab. Beim Zurückwechseln verbindet sich das Spiel automatisch und gleicht den Weltstand ab. Offline-Tabs warten auf die Rückkehr des Internets. Sind alle Spieler offline, pausiert die Welt; die bestehenden Echtzeitregeln des Erdbeerfelds bleiben erhalten.
+
+Die API sendet Cloud-Verbindungen nach 280 Sekunden ein privates, 30 Sekunden gültiges Einmalticket. Reguläre Wiederverbindungen können damit den zusätzlichen HTTP-Ticketabruf überspringen. Fehler verwenden weiterhin den HTTP-Fallback. Für zwei Spieler ergibt das rechnerisch etwa 24 statt 72 reguläre Function-Aufrufe pro Stunde, plus Seitenstarts und ungeplante Wiederverbindungen. Aktive WebSockets belegen weiterhin Vercel-RAM; eine Cloudmessung steht aus.

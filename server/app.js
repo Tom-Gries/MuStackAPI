@@ -7,6 +7,7 @@ import { parse, serialize } from 'cookie';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GameService, errorWithStatus } from './service.js';
 import { readConfig, HEARTBEAT_MS, PRESENCE_TTL } from './config.js';
+import { SOCKET_TICKET_TTL } from './realtime.js';
 
 const COOKIE = 'wald_und_werk';
 const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -27,6 +28,10 @@ function verifyOrigin(request, config) {
 
 export async function createGameServer(options = {}) {
   const config = options.config || readConfig();
+  const socketTicketRefreshMs = options.socketTicketRefreshMs ?? (config.mode === 'cloud' ? 280_000 : 0);
+  if (!Number.isFinite(socketTicketRefreshMs) || socketTicketRefreshMs < 0) throw new Error('Ungültiger Zeitpunkt für die Verbindungs-Erneuerung.');
+  const hiddenSocketTimeoutMs = options.hiddenSocketTimeoutMs ?? 30_000;
+  if (!Number.isFinite(hiddenSocketTimeoutMs) || hiddenSocketTimeoutMs < 0) throw new Error('Ungültige Wartezeit für Hintergrundverbindungen.');
   const service = options.service || await new GameService(config, options).init();
   const app = express();
   app.disable('x-powered-by');
@@ -162,6 +167,20 @@ export async function createGameServer(options = {}) {
     const id = randomUUID();
     const connection = { socket, token, player, lastSeen: Date.now(), messageTimes: [], pending: Promise.resolve() };
     connections.set(id, connection);
+    if (socketTicketRefreshMs > 0) {
+      // Prepare only this connection's next one-use upgrade before Vercel's
+      // duration limit. A reconnect can then skip the separate HTTP ticket call.
+      connection.ticketRefreshTimer = setTimeout(async () => {
+        connection.ticketRefreshTimer = null;
+        if (closing || socket.readyState !== WebSocket.OPEN) return;
+        try {
+          const expiresAt = service.now() + SOCKET_TICKET_TTL;
+          const ticket = await service.realtime.issueSocketTicket(token);
+          if (!closing && socket.readyState === WebSocket.OPEN) send(socket, { type: 'socket-ticket', ticket, expiresAt, serverTime: service.now() });
+        } catch { /* Reconnects can fall back to requesting a ticket over HTTP. */ }
+      }, socketTicketRefreshMs);
+      connection.ticketRefreshTimer.unref();
+    }
     connection.pending = connection.pending.then(async () => {
       await service.connect(id, player);
       await sendState(socket, token);
@@ -181,6 +200,23 @@ export async function createGameServer(options = {}) {
       connection.messageTimes = connection.messageTimes.filter((time) => now - time < 1_000);
       connection.messageTimes.push(now);
       if (connection.messageTimes.length > 100) return socket.close(1008, 'Zu viele Nachrichten.');
+      if (message.type === 'visibility') {
+        if (typeof message.hidden !== 'boolean') return send(socket, { type: 'error', message: 'Ungültiger Sichtbarkeitsstatus.' });
+        // Handle this connection-only control message immediately, even while
+        // a saved command is pending. Frozen browser timers cannot keep a
+        // declared background connection alive indefinitely.
+        if (!message.hidden) {
+          clearTimeout(connection.hiddenTimer);
+          connection.hiddenTimer = null;
+        } else if (hiddenSocketTimeoutMs > 0 && !connection.hiddenTimer) {
+          connection.hiddenTimer = setTimeout(() => {
+            connection.hiddenTimer = null;
+            if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'Verbindung für Hintergrund-Tab pausiert.');
+          }, hiddenSocketTimeoutMs);
+          connection.hiddenTimer.unref();
+        }
+        return;
+      }
       connection.pending = connection.pending.then(async () => {
         if (socket.readyState !== WebSocket.OPEN) return;
         if (message.type === 'ping') {
@@ -201,6 +237,8 @@ export async function createGameServer(options = {}) {
     });
     socket.on('error', () => {});
     socket.on('close', () => {
+      clearTimeout(connection.ticketRefreshTimer);
+      clearTimeout(connection.hiddenTimer);
       connections.delete(id);
       const leaving = connection.pending.finally(() => service.disconnect(id, connection.lastSeen + PRESENCE_TTL)).catch(() => {});
       disconnections.add(leaving);
@@ -221,7 +259,11 @@ export async function createGameServer(options = {}) {
     closing = true;
     clearInterval(heartbeat);
     const pending = [...connections.values()].map((connection) => connection.pending.catch(() => {}));
-    for (const { socket } of connections.values()) socket.terminate();
+    for (const { socket, ticketRefreshTimer, hiddenTimer } of connections.values()) {
+      clearTimeout(ticketRefreshTimer);
+      clearTimeout(hiddenTimer);
+      socket.terminate();
+    }
     await Promise.all(pending);
     await new Promise((resolve) => sockets.close(resolve));
     await Promise.all([...disconnections]);
