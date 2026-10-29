@@ -9,6 +9,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createGameServer } from '../server/app.js';
 import { readConfig } from '../server/config.js';
 import { Realtime } from '../server/realtime.js';
+import { createMongoMemory } from './helpers/mongo-memory.js';
+import { FileRepository } from '../server/repository.js';
+import { createWorld } from '@stackfriends/shared/game.js';
 
 const FRONTEND = 'https://play.example.test';
 async function setup(t, now = Date.now, options = {}) {
@@ -147,7 +150,7 @@ test('ticket preparation failure leaves an established socket healthy for HTTP f
   const f = await setup(t, Date.now, { socketTicketRefreshMs: 20 });
   const joined = await f.join();
   let attempts = 0;
-  const failedPreparation = t.mock.method(f.game.service.realtime, 'issueSocketTicket', async () => { attempts++; throw new Error('private Redis details'); });
+  const failedPreparation = t.mock.method(f.game.service.realtime, 'issueSocketTicket', async () => { attempts++; throw new Error('private database details'); });
   const connected = await socketState(t, f.address, { cookie: joined.cookie });
   await delay(80);
   assert.equal(attempts, 1);
@@ -263,29 +266,19 @@ test('same-origin legacy cookie WebSockets still work and the API does not serve
   assert.equal(asset.status, 404);
 });
 
-test('ticket storage is shared across API instances and consumed atomically in Redis', async () => {
+test('ticket storage is shared across API instances and consumed atomically in MongoDB', async (t) => {
   let now = 1000;
-  const entries = new Map();
-  const calls = [];
-  const redis = {
-    async set(key, value, mode, ttl) { calls.push({ mode, ttl }); entries.set(key, value); return 'OK'; },
-    async eval(script, count, key) {
-      assert.match(script, /DEL/); assert.equal(count, 1);
-      const previous = entries.get(key); entries.delete(key); return previous || null;
-    },
-  };
-  const a = new Realtime({ redisNamespace: 'tickets-test' }, () => now);
-  const b = new Realtime({ redisNamespace: 'tickets-test' }, () => now);
-  a.redis = redis; b.redis = redis;
+  const { database } = createMongoMemory();
+  const a = await new Realtime({}, () => now, { database }).init();
+  const b = await new Realtime({}, () => now, { database }).init();
+  t.after(async () => { await a.close(); await b.close(); });
   const ticket = await a.issueSocketTicket('opaque-session');
-  assert.deepEqual(calls, [{ mode: 'PX', ttl: 30000 }]);
   const consumed = await Promise.all([a.consumeSocketTicket(ticket), b.consumeSocketTicket(ticket)]);
   assert.equal(consumed.filter((value) => value === 'opaque-session').length, 1);
   const expired = await a.issueSocketTicket('opaque-session');
   now += 30000;
-  assert.equal(await b.consumeSocketTicket(expired), undefined);
+  assert.equal(await b.consumeSocketTicket(expired), undefined, 'expiry is checked even when TTL maintenance has not deleted the document');
 });
-
 test('local ticket memory is bounded, expired entries disappear, and API_ORIGIN is validated', async () => {
   let now = 0;
   const realtime = new Realtime({}, () => now);
@@ -298,6 +291,44 @@ test('local ticket memory is bounded, expired entries disappear, and API_ORIGIN 
   assert.equal(readConfig({ API_ORIGIN: 'https://api.example.test/' }).socketOrigin, 'https://api.example.test');
   assert.equal(readConfig({ API_ORIGIN: 'http://localhost:3001' }).socketOrigin, 'http://localhost:3001');
   for (const address of ['file:///tmp/api', 'https://user:password@example.test/', 'https://api.example.test/path', 'http://api.example.test']) assert.throws(() => readConfig({ API_ORIGIN: address }), /API_ORIGIN/);
-  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: 'mongodb://localhost', REDIS_URL: 'redis://localhost', API_ORIGIN: 'http://localhost:3001' }), /API_ORIGIN/);
+  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: 'mongodb://localhost', API_ORIGIN: 'http://localhost:3001' }), /API_ORIGIN/);
   assert.equal(readConfig({}).worldFile, fileURLToPath(new URL('../.data/world.json', import.meta.url)));
+});
+
+test('separate API sockets share MongoDB tickets, stack reservations, drag previews and committed moves', async (t) => {
+  const now = () => 1000;
+  const { database } = createMongoMemory();
+  const repository = new FileRepository('unused-two-api-memory-world', now);
+  repository.state = { world: createWorld(now()), sessions: {}, commandIds: [], activeUntil: now() };
+  repository.persist = async () => {};
+  const aRealtime = await new Realtime({}, now, { database }).init();
+  const bRealtime = await new Realtime({}, now, { database }).init();
+  const a = await setup(t, now, { repository, realtime: aRealtime });
+  const b = await setup(t, now, { repository, realtime: bRealtime });
+  const joinedA = await a.request('/api/join', { name: 'Spielerin A' });
+  const joinedB = await b.request('/api/join', { name: 'Spieler B' });
+  const ticketA = await a.request('/api/socket-ticket', {}, joinedA.cookie);
+  const ticketB = await b.request('/api/socket-ticket', {}, joinedB.cookie);
+  const socketA = await socketState(t, b.address, { ticket: ticketA.body.ticket });
+  const socketB = await socketState(t, a.address, { ticket: ticketB.body.ticket });
+  assert.equal(socketA.state.player.id, joinedA.body.player.id, 'a ticket issued by one API must authenticate on the other');
+  assert.equal(socketB.state.player.id, joinedB.body.player.id);
+  assert.equal((await socketState(t, a.address, { ticket: ticketA.body.ticket })).status, 401);
+  const cardId = joinedA.body.player.cardId;
+  socketA.socket.send(JSON.stringify({ type: 'drag-start', cardId, takeAbove: true }));
+  const lock = await socketB.wait((message) => message.type === 'lock' && message.cardId === cardId);
+  assert.equal(lock.playerId, joinedA.body.player.id);
+  socketB.socket.send(JSON.stringify({ type: 'drag-start', cardId, takeAbove: true }));
+  const conflict = await socketB.wait((message) => message.type === 'error' && message.cardId === cardId);
+  assert.match(conflict.message, /jemand anderes/);
+  socketA.socket.send(JSON.stringify({ type: 'drag', cardId, x: 600, y: 400 }));
+  const preview = await socketB.wait((message) => message.type === 'drag' && message.cardId === cardId);
+  assert.equal(preview.x, 600);
+  assert.equal(preview.y, 400);
+  socketA.socket.send(JSON.stringify({ type: 'command', commandId: 'shared-mongo-move', command: { type: 'move', cardId, x: 600, y: 400, takeAbove: true } }));
+  const patch = await socketB.wait((message) => message.type === 'patch' && message.upsert.some((card) => card.id === cardId && card.x === 600));
+  const acknowledgement = await socketA.wait((message) => message.type === 'ack' && message.commandId === 'shared-mongo-move');
+  assert.equal(acknowledgement.type, 'ack');
+  assert.equal(repository.state.world.cards.find((card) => card.id === cardId).x, 600);
+  assert.equal(patch.revision, repository.state.world.revision);
 });

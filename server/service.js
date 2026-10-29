@@ -62,7 +62,17 @@ export class GameService extends EventEmitter {
 
   async init() {
     this.repository ||= await createRepository(this.config, this.now);
-    this.realtime ||= await new Realtime(this.config, this.now).init();
+    if (!this.realtime) {
+      try {
+        this.realtime = await new Realtime(this.config, this.now, {
+          database: this.repository.client?.db(this.repository.database),
+          worldId: this.repository.worldId,
+        }).init();
+      } catch (error) {
+        await this.repository.close();
+        throw error;
+      }
+    }
     this.realtime.on('event', (event) => {
       this.emit('event', event);
       if (event.type === 'patch' && event.revision >= this.latestScheduledRevision) {
@@ -70,7 +80,12 @@ export class GameService extends EventEmitter {
         this.schedule(this.eventWorlds.get(event)).catch((error) => this.emit('fault', error));
       }
     });
-    this.realtime.on('resync', () => this.emit('resync'));
+    this.realtime.on('resync', () => {
+      this.emit('resync');
+      // A world commit can survive its publisher. Recover its pending jobs as
+      // well as the clients' view, even if no subsequent player action occurs.
+      this.schedule().catch((error) => this.emit('fault', error));
+    });
     this.realtime.on('unavailable', () => this.emit('unavailable'));
     return this;
   }

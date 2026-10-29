@@ -30,6 +30,20 @@ test('snapshots return the reconciled world and session without reading the worl
   assert.equal((await service.snapshot('invalid')).player, null);
 });
 
+test('resync recovers scheduled jobs from a committed world whose publication was lost', async (t) => {
+  const { service, repository, realtime } = await fixture(t);
+  assert.equal(service.timer, null);
+  repository.state.world.revision++;
+  repository.state.world.jobs = [{ id: 'unpublished-job', timeBase: 'world', dueAt: 60_000 }];
+  let resyncs = 0;
+  service.on('resync', () => { resyncs++; });
+  realtime.emit('resync');
+  await flush();
+  assert.equal(resyncs, 1);
+  assert.ok(service.timer, 'pending work must continue without another player action');
+  assert.equal(service.latestScheduledRevision, repository.state.world.revision);
+});
+
 test('a committed local move schedules from its own world without an extra Mongo world read', async (t) => {
   const { service, repository, joined } = await fixture(t);
   let fullReads = 0;

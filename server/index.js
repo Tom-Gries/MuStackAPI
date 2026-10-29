@@ -13,7 +13,7 @@ async function main() {
     : process.env);
   const game = await createGameServer({ config });
   game.server.listen(config.port, '127.0.0.1', () => {
-    const storage = config.mongoUri ? `MongoDB${config.redisUrl ? ' + Redis' : ', lokaler Echtzeitverteiler'}` : 'lokaler, gespeicherter Weltstand';
+    const storage = config.mongoUri ? 'MongoDB' : 'lokaler, gespeicherter Weltstand';
     console.log(`StackFriends: http://127.0.0.1:${config.port} (${storage})`);
   });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
@@ -24,6 +24,6 @@ async function main() {
 
 main().catch(() => {
   // Connection libraries can include a complete URI in diagnostics. Never log it.
-  console.error('StackFriends konnte nicht starten. Bitte MongoDB-/Redis-Konfiguration, Netzwerkfreigabe und Datenbankrechte prüfen.');
+  console.error('StackFriends konnte nicht starten. Bitte MongoDB-Konfiguration, Netzwerkfreigabe und Datenbankrechte prüfen.');
   process.exitCode = 1;
 });

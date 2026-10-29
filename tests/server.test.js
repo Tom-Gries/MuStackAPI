@@ -58,22 +58,21 @@ async function connect(address, cookie) {
   return { socket, messages, wait, send: (data) => socket.send(JSON.stringify(data)) };
 }
 
-test('cloud config requires persistent services on Vercel; MongoDB can be tried locally', () => {
-  assert.throws(() => readConfig({ VERCEL: '1' }), /MONGODB_URI und REDIS_URL/);
-  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: 'mongodb://localhost:27017' }), /MONGODB_URI und REDIS_URL/);
-  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: ' ', REDIS_URL: 'redis://localhost:6379' }), /MONGODB_URI und REDIS_URL/);
+test('cloud config requires MongoDB on Vercel; MongoDB can be tried locally', () => {
+  assert.throws(() => readConfig({ VERCEL: '1' }), /MONGODB_URI/);
+  assert.throws(() => readConfig({ VERCEL: '1', MONGODB_URI: ' ' }), /MONGODB_URI/);
   const config = readConfig({ MONGODB_URI: 'mongodb://localhost:27017', MONGODB_DB: 'test_world', APP_ORIGIN: 'https://example.test' });
   assert.equal(config.mongoDatabase, 'test_world');
-  assert.equal(config.redisNamespace, 'stackfriends:test_world');
   assert.equal(config.publicOrigin, 'https://example.test');
-  assert.equal(config.redisUrl, undefined);
   assert.equal(readConfig({}).mongoDatabase, 'StackFriends-dev');
   const encoded = 'mongodb+srv://a%40b:x%3Ay%2Fz@example.test/';
   assert.equal(resolveMongoUri({ MONGODB_URI: ` ${encoded} ` }), encoded);
   for (const credentials of ['<username>:<db_password>', '{username}:{password}', '${MONGODB_USERNAME}:${MONGODB_PASSWORD}']) {
     assert.throws(() => resolveMongoUri({ MONGODB_URI: `mongodb+srv://${credentials}@example.test/` }), /Platzhalter/);
   }
-  const production = readConfig({ VERCEL: '1', MONGODB_URI: encoded, REDIS_URL: 'redis://localhost:6379', APP_ORIGIN: 'https://example.test' });
+  const production = readConfig({ VERCEL: '1', MONGODB_URI: encoded, APP_ORIGIN: 'https://example.test' });
+  assert.equal(production.mode, 'cloud');
+  assert.equal(production.mongoUri, encoded);
   assert.equal(production.secureCookie, true);
   assert.equal(readConfig({}).secureCookie, false);
 });
@@ -155,7 +154,7 @@ test('package clicks reveal one card each; repeated HTTP/WS command IDs cannot d
   assert.equal(world.cards.filter((card) => card.type === 'tree').length, 3);
 });
 
-test('WebSockets share deltas, reserve stacks, throttle previews, and never persist dragging', async (t) => {
+test('WebSockets share deltas, reserve stacks, throttle previews, and never persist previews in the world', async (t) => {
   const { join, game, address } = await setup(t);
   const a = await join('Anna');
   const b = await join('Ben');

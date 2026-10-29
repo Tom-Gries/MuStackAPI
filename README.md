@@ -17,15 +17,18 @@ Die API läuft auf http://127.0.0.1:3001. Der lokale Modus verwendet `.data/worl
 
 ## Konfiguration
 
-Lokale Einstellungen gehören in die ignorierte Datei `.env.local`; `.env.example` dient als Vorlage. Bei Vercel diese drei Pflichtvariablen im API-Projekt setzen:
+Lokale Einstellungen gehören in die ignorierte Datei `.env.local`; `.env.example` dient als Vorlage. Bei Vercel diese zwei Pflichtvariablen im API-Projekt setzen:
 
 | Pflichtvariable | Wert |
 | --- | --- |
 | `MONGODB_URI` | Vollständige MongoDB-Atlas-Verbindungsadresse einschließlich Zugangsdaten. |
-| `REDIS_URL` | Native Redis-Verbindungsadresse (`redis://` oder `rediss://`) für den Austausch zwischen API-Instanzen. |
 | `APP_ORIGIN` | Genaue öffentliche Frontend-Adresse einschließlich `https://`. |
 
-MongoDB speichert den dauerhaften Spielstand. Redis koordiniert Nachrichten, Anwesenheit, Reservierungen und Einmaltickets zwischen laufenden API-Instanzen. Für den Betrieb auf Vercel sind beide Dienste erforderlich.
+MongoDB speichert den dauerhaften Spielstand und koordiniert Nachrichten, Anwesenheit, Kartenreservierungen und Einmaltickets zwischen laufenden API-Instanzen. Nachrichten werden über MongoDB Change Streams übertragen. Ein zusätzlicher Datenbank- oder Nachrichtenserver ist nicht erforderlich.
+
+Bewegungsvorschauen erzeugen dabei begrenzte, kurzlebige MongoDB-Datensätze. TTL-Indizes räumen Nachrichten und abgelaufene Verbindungsdaten auf. Pro API-Prozess läuft höchstens ein Change Stream; er wird geschlossen, sobald dort keine Spieler mehr verbunden sind. Die Browser erhalten Änderungen weiterhin über ihre Sockets.
+
+Der Datenbanknutzer benötigt Lese- und Schreibrechte einschließlich `changeStream` und `find` auf der Spieldatenbank. Die übliche Rolle `readWrite` enthält diese Rechte. Siehe [MongoDB Change Streams](https://www.mongodb.com/docs/manual/changestreams/#access-control) und [MongoDB-Rollen](https://www.mongodb.com/docs/manual/reference/built-in-roles/#readwrite).
 
 Optional legt `MONGODB_DB` den Datenbanknamen fest; der Standard ist `StackFriends-dev`. `API_ORIGIN` kann die öffentliche API-Adresse für direkte WebSocket-Verbindungen festlegen. Lokal kann `PORT` den Standardport 3001 ersetzen und `WORLD_FILE` den Pfad zur Dateiwelt. Zugangsdaten werden ausschließlich im Backend hinterlegt und nicht in Git eingecheckt.
 
@@ -37,6 +40,8 @@ npm run check
 ```
 
 Die API-Tests prüfen Speicherung, Sitzung, Echtzeitverbindungen und die Zusammenarbeit mehrerer Instanzen. Installation, Tests und CI benötigen keinen weiteren lokalen Checkout. Die eigentlichen Spielregeltests liegen im Shared-Repository.
+
+Die MongoDB-Tests verwenden eine isolierte Datenbank-Fixture und brauchen keine Atlas-Zugangsdaten. Sie ersetzen keinen Verbindungstest mit dem tatsächlich konfigurierten Cluster.
 
 ## Gemeinsame Spielregeln
 
@@ -54,4 +59,4 @@ Anschließend beide Apps prüfen und ihre jeweiligen Änderungen committen/pushe
 
 Dieses Repository als eigenes Projekt mit Framework **Other** importieren. Root Directory ist der Repository-Hauptordner. `vercel.json` enthält den Node-/WebSocket-Einstieg `api/socket.js`; Fluid Compute muss aktiv sein.
 
-Die drei Pflichtvariablen aus der Konfiguration im API-Projekt setzen. Im Frontend-Projekt wird zusätzlich `BACKEND_URL` auf die API-Adresse gesetzt. Das Shared-Paket ist eine Bibliothek und erhält kein eigenes Vercel-Deployment.
+Die zwei Pflichtvariablen aus der Konfiguration im API-Projekt setzen. Im Frontend-Projekt wird zusätzlich `BACKEND_URL` auf die API-Adresse gesetzt. Das Shared-Paket ist eine Bibliothek und erhält kein eigenes Vercel-Deployment.

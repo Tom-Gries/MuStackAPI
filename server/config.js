@@ -14,11 +14,10 @@ export function resolveMongoUri(env) {
 
 export function readConfig(env = process.env) {
   const mongoUri = resolveMongoUri(env);
-  const redisUrl = env.REDIS_URL?.trim() || undefined;
   const mongoDatabase = env.MONGODB_DB?.trim() || 'StackFriends-dev';
   const cloud = env.VERCEL === '1' || Boolean(mongoUri);
-  if (env.VERCEL === '1' && (!mongoUri || !redisUrl)) {
-    throw new Error('Für den Cloudbetrieb sind MONGODB_URI und REDIS_URL erforderlich. Lokaler Dateispeicher ist auf Vercel deaktiviert.');
+  if (env.VERCEL === '1' && !mongoUri) {
+    throw new Error('Für den Cloudbetrieb ist MONGODB_URI erforderlich. Lokaler Dateispeicher ist auf Vercel deaktiviert.');
   }
   let socketOrigin;
   if (env.API_ORIGIN) {
@@ -32,8 +31,6 @@ export function readConfig(env = process.env) {
     mode: cloud ? 'cloud' : 'local',
     mongoUri,
     mongoDatabase,
-    redisUrl,
-    redisNamespace: `stackfriends:${mongoDatabase}`,
     worldFile: env.WORLD_FILE || fileURLToPath(new URL('../.data/world.json', import.meta.url)),
     port: Number(env.PORT || 3001),
     secureCookie: env.VERCEL === '1',
