@@ -56,9 +56,13 @@ export class MongoRealtimeStore {
   }
 
   async open(generation, recovering) {
-    // The anchor is taken before watch() starts its lazy cursor. Events written
-    // during cursor startup remain in the oplog and cannot fall into that gap.
-    const reply = await this.database.command({ ping: 1 });
+    // A read supplies the logical time before watch() starts its lazy cursor.
+    // Atlas ping replies can omit time metadata even when streams are supported.
+    // Project only the world identity; the snapshot is loaded by GameService.
+    const reply = await this.database.command({
+      find: 'worlds', filter: { _id: this.worldId }, projection: { _id: 1 },
+      limit: 1, singleBatch: true,
+    });
     const operationTime = reply.operationTime || reply.$clusterTime?.clusterTime;
     if (!operationTime) throw new Error('MongoDB stellt keine Echtzeit-Änderungen bereit.');
     if (!this.running || generation !== this.generation || this.closed) return;

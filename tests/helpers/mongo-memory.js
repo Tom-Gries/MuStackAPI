@@ -115,7 +115,12 @@ export function createMongoMemory() {
     });
     return stream;
   };
-  database.command = async (command) => { record('$database', 'command', [command]); return { ok: 1, operationTime }; };
+  database.command = async (command) => {
+    record('$database', 'command', [command]);
+    if (command.ping === 1) return { ok: 1 };
+    if (command.find) return { ok: 1, operationTime, $clusterTime: { clusterTime: operationTime }, cursor: { id: 0, firstBatch: [] } };
+    throw new Error('Unsupported fixture database command');
+  };
   database.collection = (name) => {
     if (collections.has(name)) return collections.get(name);
     const docs = new Map();

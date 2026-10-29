@@ -103,16 +103,31 @@ test('one database stream sends only fresh foreign events for its world', async 
   assert.equal(streams.size, 0);
 });
 
-test('server operationTime anchors delivery across lazy change-stream startup', async (t) => {
+test('streams start when Atlas ping replies contain no logical time metadata', async (t) => {
+  const { database, calls, streams, a } = await fixture(t);
+  assert.deepEqual(await database.command({ ping: 1 }), { ok: 1 });
+  let unavailable = 0;
+  await a.start(() => {}, () => { unavailable++; });
+  assert.equal(unavailable, 0);
+  assert.equal(streams.size, 1);
+  const reads = calls.filter((call) => call.operation === 'command' && call.args[0].find);
+  assert.deepEqual(reads.map((call) => call.args[0]), [{
+    find: 'worlds', filter: { _id: 'shared' }, projection: { _id: 1 }, limit: 1, singleBatch: true,
+  }]);
+  const watch = calls.find((call) => call.operation === 'watch');
+  assert.ok(watch.args[1].startAtOperationTime);
+});
+
+test('the projected read anchors delivery across lazy change-stream startup', async (t) => {
   const { database, a, b } = await fixture(t);
   const received = [];
   database.beforeWatch = () => {
     database.beforeWatch = undefined;
-    void b.publish({ type: 'between-ping-and-cursor' });
+    void b.publish({ type: 'between-read-and-cursor' });
   };
   await a.start((event) => received.push(event));
   await flush();
-  assert.deepEqual(received, [{ type: 'between-ping-and-cursor' }]);
+  assert.deepEqual(received, [{ type: 'between-read-and-cursor' }]);
 });
 
 test('a committed world write without publication triggers one delayed resync', async (t) => {
