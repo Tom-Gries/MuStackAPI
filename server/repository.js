@@ -2,266 +2,169 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { MongoClient } from 'mongodb';
-import { createWorld } from '@stackfriends/shared/game.js';
+import { getCatalog } from '@stackfriends/shared/catalog.js';
+import { ensurePersonalCatalog } from '@stackfriends/shared/personal-world.js';
 
-function storageError(cause) {
-  return Object.assign(new Error('Der Weltstand konnte nicht mit MongoDB abgeglichen werden. Bitte Verbindung und Datenbankrechte prüfen.', { cause }), { status: 503 });
-}
+const clone = (value) => structuredClone(value);
+const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+const empty = (catalog = getCatalog()) => ({ schemaVersion: 2, catalog: ensurePersonalCatalog(catalog), players: {}, gifts: {} });
+const storageError = (cause) => Object.assign(new Error('Der persönliche Weltstand konnte nicht gespeichert werden. Bitte versuche es erneut.', { cause }), { status: 503 });
 
-function initialState(now) {
-  return { world: createWorld(now), sessions: {}, commandIds: [], activeUntil: now };
-}
-
-const payloadBytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8');
-const sessionHash = (hash) => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash);
-const sessionPlayer = (state, hash) => state?.world?.players.find((player) => player.id === state.sessions?.[hash]?.playerId) || null;
-const emptyContext = () => ({ world: { players: [], cards: [] }, sessions: {} });
-const document = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-const safeKey = (key) => key.length > 0 && !key.includes('.') && !key.startsWith('$');
-const emptyUpdate = () => ({ $set: {}, $unset: {}, $push: {} });
-const mergeUpdate = (target, source) => {
-  for (const operator of Object.keys(target)) Object.assign(target[operator], source[operator]);
-};
-
-/** All paths address the revision checked by the same atomic updateOne. */
-function mongoUpdate(before, after) {
-  const update = emptyUpdate();
-  const diff = (previous, next, location, changes) => {
-    if (equal(previous, next)) return;
-    if (next === undefined) { changes.$unset[location] = 1; return; }
-    if (Array.isArray(previous) && Array.isArray(next)) {
-      if (next.length > previous.length && equal(previous, next.slice(0, previous.length))) {
-        changes.$push[location] = { $each: next.slice(previous.length) };
-        return;
+/** Send changed fields only. A transaction protects concurrent tabs and gifts. */
+export function mongoUpdate(before, after) {
+  const update = { $set: {}, $unset: {} };
+  const object = (value) => value && typeof value === 'object' && !Array.isArray(value);
+  const visit = (left, right, key) => {
+    if (JSON.stringify(left) === JSON.stringify(right)) return;
+    if (right === undefined) { update.$unset[key] = 1; return; }
+    if (object(left) && object(right) && Object.keys({ ...left, ...right }).every((name) => !name.includes('.') && !name.startsWith('$'))) {
+      for (const name of new Set([...Object.keys(left), ...Object.keys(right)])) visit(left[name], right[name], key ? `${key}.${name}` : name);
+    } else if (Array.isArray(left) && Array.isArray(right) && left.length === right.length) {
+      const elementUpdate = { $set: {}, $unset: {} };
+      const start = clone(update);
+      for (let index = 0; index < right.length; index++) visit(left[index], right[index], `${key}.${index}`);
+      for (const operator of ['$set', '$unset']) for (const location of Object.keys(update[operator])) if (location.startsWith(`${key}.`)) elementUpdate[operator][location] = update[operator][location];
+      if (bytes(elementUpdate) > bytes(right)) {
+        for (const operator of ['$set', '$unset']) for (const location of Object.keys(update[operator])) if (location.startsWith(`${key}.`)) delete update[operator][location];
+        Object.assign(update.$set, start.$set); Object.assign(update.$unset, start.$unset); update.$set[key] = right;
       }
-      // Command deduplication retains a rolling window. Send only its new tail,
-      // even once all 2,000 slots are occupied; keep the trim in the same CAS.
-      if (location === 'commandIds' && next.length && next[0]?.id) {
-        const offset = previous.findIndex((entry) => entry.id === next[0].id);
-        const overlap = previous.length - offset;
-        if (offset > 0 && overlap <= next.length && equal(previous.slice(offset), next.slice(0, overlap)) && next.length > overlap) {
-          changes.$push[location] = { $each: next.slice(overlap), $slice: -next.length };
-          return;
-        }
-      }
-      if (previous.length === next.length) {
-        const elements = emptyUpdate();
-        for (let index = 0; index < next.length; index++) diff(previous[index], next[index], `${location}.${index}`, elements);
-        const replacement = { $set: { [location]: next } };
-        if (payloadBytes(elements) < payloadBytes(replacement)) { mergeUpdate(changes, elements); return; }
-      }
-      // Removals/reordering can change array indices; replacing this array is
-      // safe and still avoids retransmitting the rest of the world document.
-      changes.$set[location] = next;
-      return;
-    }
-    if (document(previous) && document(next)) {
-      const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
-      if ([...keys].every(safeKey)) {
-        for (const key of keys) diff(Object.hasOwn(previous, key) ? previous[key] : undefined, Object.hasOwn(next, key) ? next[key] : undefined, location ? `${location}.${key}` : key, changes);
-        return;
-      }
-    }
-    if (!location) throw new Error('Ungültige Felder im Weltstand.');
-    changes.$set[location] = next;
+    } else update.$set[key] = right;
   };
-  diff(before, after, '', update);
-  return Object.fromEntries(Object.entries(update).filter(([, values]) => Object.keys(values).length));
+  visit(before, after, '');
+  return Object.fromEntries(Object.entries(update).filter(([, changes]) => Object.keys(changes).length));
 }
 
-/** File writes are serialized and atomically renamed; this adapter is local-only. */
+class FileContext {
+  constructor(state) { this.state = state; }
+  async catalog() { return clone(this.state.catalog); }
+  async setCatalog(catalog) { this.state.catalog = clone(catalog); }
+  async playerByToken(hash) { return clone(Object.values(this.state.players).find((player) => player.tokenHashes.includes(hash)) || null); }
+  async playerByName(nameKey) { return clone(Object.values(this.state.players).find((player) => player.nameKey === nameKey) || null); }
+  async playerById(id) { return clone(this.state.players[id] || null); }
+  async players() { return clone(Object.values(this.state.players)); }
+  async presencePlayer(hash) { const player = await this.playerByToken(hash); if (!player) return null; const { world, commandIds, ...profile } = player; return profile; }
+  async presencePlayers(now) { return Object.values(this.state.players).filter((player) => now === undefined || player.presenceUntil > now).map(({ _id, name, presenceUntil, lastSavedAt }) => ({ _id, name, presenceUntil, lastSavedAt })); }
+  async updatePresence(player, fields) { Object.assign(this.state.players[player._id], fields); }
+  async savePlayer(player) { this.state.players[player._id] = clone(player); }
+  async pendingGifts(recipientId) { return clone(Object.values(this.state.gifts).filter((gift) => gift.status === 'pending' && (!recipientId || gift.recipientId === recipientId))); }
+  async giftByOperation(operationId) { return clone(Object.values(this.state.gifts).find((gift) => gift.operationId === operationId) || null); }
+  async saveGift(gift) { this.state.gifts[gift._id] = clone(gift); }
+}
+
+/** Local operations serialize, clone first, then atomically replace a separate personal-worlds file. */
 export class FileRepository {
-  constructor(filename, now = Date.now) {
-    this.filename = filename;
-    this.now = now;
-    this.queue = Promise.resolve();
+  constructor(filename, now = Date.now, options = {}) {
+    this.filename = filename; this.legacyFilename = options.legacyFilename || path.join(path.dirname(filename), 'world.json'); this.now = now; this.queue = Promise.resolve();
     this.metrics = { reads: 0, writes: 0, conflicts: 0, readBytes: 0, writeBytes: 0 };
   }
-
   async init() {
     try {
       this.state = JSON.parse(await readFile(this.filename, 'utf8'));
-      if (!this.state.world || !this.state.sessions) throw new Error('Ungültiger lokaler Weltstand.');
+      if (this.state.schemaVersion !== 2 || !this.state.players || !this.state.gifts || !this.state.catalog) throw new Error('Ungültiger persönlicher Weltstand.');
+      const catalog = ensurePersonalCatalog(this.state.catalog);
+      if (JSON.stringify(catalog) !== JSON.stringify(this.state.catalog)) { this.state.catalog = catalog; await this.persist(this.state); }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
-      this.state = initialState(this.now());
-      await this.persist(this.state);
+      let catalog;
+      try { const legacy = JSON.parse(await readFile(this.legacyFilename, 'utf8')); catalog = getCatalog(legacy.world || legacy); }
+      catch (legacyError) { if (legacyError.code !== 'ENOENT') throw legacyError; }
+      this.state = empty(catalog); await this.persist(this.state);
     }
     return this;
   }
-
   async persist(state) {
     await mkdir(path.dirname(this.filename), { recursive: true });
-    const temporary = `${this.filename}.${randomUUID()}.tmp`;
-    const encoded = JSON.stringify(state);
-    await writeFile(temporary, encoded, 'utf8');
-    await rename(temporary, this.filename);
-    this.metrics.writes++;
-    this.metrics.writeBytes += Buffer.byteLength(encoded);
+    const temporary = `${this.filename}.${randomUUID()}.tmp`, contents = JSON.stringify(state);
+    await writeFile(temporary, contents, 'utf8'); await rename(temporary, this.filename);
+    this.metrics.writes++; this.metrics.writeBytes += Buffer.byteLength(contents);
   }
-
-  async read() {
-    await this.queue;
-    this.metrics.reads++;
-    this.metrics.readBytes += payloadBytes(this.state);
-    return structuredClone(this.state);
-  }
-
-  async world() {
-    await this.queue;
-    this.metrics.reads++;
-    this.metrics.readBytes += payloadBytes(this.state.world);
-    return structuredClone(this.state.world);
-  }
-
-  async playerForSession(hash) {
-    if (!sessionHash(hash)) return null;
-    await this.queue;
-    this.metrics.reads++;
-    const player = sessionPlayer(this.state, hash);
-    this.metrics.readBytes += payloadBytes(player);
-    return structuredClone(player);
-  }
-
-  async commandContext(hash) {
-    if (!sessionHash(hash)) return emptyContext();
-    await this.queue;
-    this.metrics.reads++;
-    const session = this.state.sessions[hash];
-    const context = session ? { world: { players: this.state.world.players, cards: this.state.world.cards }, sessions: { [hash]: session } } : emptyContext();
-    this.metrics.readBytes += payloadBytes(context);
-    return structuredClone(context);
-  }
-
-  async revision() {
-    await this.queue;
-    this.metrics.reads++;
-    this.metrics.readBytes += payloadBytes(this.state.world.revision);
-    return this.state.world.revision;
-  }
-
-  async mutate(change) {
-    const operation = this.queue.then(async () => {
-      const draft = structuredClone(this.state);
-      const before = structuredClone(this.state.world);
-      const result = await change(draft);
-      if (result?.changed === false) return { world: before, before, result: result.value, changed: false };
-      draft.world.revision = before.revision + 1;
-      await this.persist(draft);
-      this.state = draft;
-      return { world: structuredClone(draft.world), before, result: result?.value, changed: true };
+  async transaction(operation) {
+    const pending = this.queue.then(async () => {
+      const state = clone(this.state); this.metrics.reads++;
+      const result = await operation(new FileContext(state));
+      if (JSON.stringify(state) !== JSON.stringify(this.state)) { await this.persist(state); this.state = state; }
+      return result;
     });
-    this.queue = operation.catch(() => {});
-    return operation;
+    this.queue = pending.catch(() => {}); return pending;
   }
-
+  async read(operation) { await this.queue; this.metrics.reads++; return operation(new FileContext(clone(this.state))); }
   async close() { await this.queue; }
 }
 
-/** Each mutation, consumption and command ID still commit in one atomic CAS. */
+class MongoContext {
+  constructor(repository, session) { this.repository = repository; this.session = session; this.before = new Map(); }
+  get options() { return this.session ? { session: this.session } : {}; }
+  async one(collection, filter) { this.repository.metrics.reads++; const value = await collection.findOne(filter, this.options); if (value) this.repository.metrics.readBytes += bytes(value); return value; }
+  async catalog() {
+    const document = await this.one(this.repository.catalogs, { _id: 'global' });
+    if (this.session) {
+      // The small fence prevents catalog validation and a world mutation from
+      // committing incompatible cross-document snapshots.
+      await this.repository.catalogs.updateOne({ _id: 'global', revision: document.catalog.revision }, { $inc: { fence: 1 } }, this.options); this.repository.metrics.writes++;
+    }
+    return document.catalog;
+  }
+  async setCatalog(catalog) { await this.repository.catalogs.updateOne({ _id: 'global' }, { $set: { catalog, revision: catalog.revision } }, this.options); this.repository.metrics.writes++; }
+  async remember(player) { if (player) this.before.set(player._id, clone(player)); return player; }
+  async playerByToken(hash) { return this.remember(await this.one(this.repository.players, { tokenHashes: hash })); }
+  async playerByName(nameKey) { return this.remember(await this.one(this.repository.players, { nameKey })); }
+  async playerById(id) { return this.remember(await this.one(this.repository.players, { _id: id })); }
+  async players() { this.repository.metrics.reads++; return this.repository.players.find({}, this.options).toArray(); }
+  async presencePlayer(hash) { this.repository.metrics.reads++; return this.repository.players.findOne({ tokenHashes: hash }, { ...this.options, projection: { world: 0, commandIds: 0 } }); }
+  async presencePlayers(now) { this.repository.metrics.reads++; return this.repository.players.find(now === undefined ? {} : { presenceUntil: { $gt: now } }, { ...this.options, projection: { _id: 1, name: 1, presenceUntil: 1, lastSavedAt: 1 } }).toArray(); }
+  async updatePresence(player, fields) { await this.repository.players.updateOne({ _id: player._id }, { $set: fields }, this.options); this.repository.metrics.writes++; this.repository.metrics.writeBytes += bytes(fields); }
+  async savePlayer(player) {
+    const previous = this.before.get(player._id);
+    if (previous) {
+      const update = mongoUpdate(previous, player); if (!Object.keys(update).length) return;
+      const result = await this.repository.players.updateOne({ _id: player._id, revision: previous.revision }, update, this.options);
+      if (result.matchedCount !== 1) throw Object.assign(new Error('Deine Welt wurde gleichzeitig geändert. Bitte versuche es erneut.'), { status: 409 });
+      this.repository.metrics.writeBytes += bytes(update);
+    } else { await this.repository.players.insertOne(player, this.options); this.repository.metrics.writeBytes += bytes(player); }
+    this.repository.metrics.writes++; this.before.set(player._id, clone(player));
+  }
+  async pendingGifts(recipientId) { this.repository.metrics.reads++; return this.repository.gifts.find({ status: 'pending', ...(recipientId ? { recipientId } : {}) }, this.options).sort({ createdAt: 1, _id: 1 }).toArray(); }
+  async giftByOperation(operationId) { return this.one(this.repository.gifts, { operationId }); }
+  async saveGift(gift) { await this.repository.gifts.replaceOne({ _id: gift._id }, gift, { ...this.options, upsert: true }); this.repository.metrics.writes++; this.repository.metrics.writeBytes += bytes(gift); }
+}
+
+/** One pooled client; requests finish their transactions and hold no persistent transport. */
 export class MongoRepository {
-  constructor(uri, database, now = Date.now, worldId = 'shared') {
-    this.client = new MongoClient(uri, { maxPoolSize: 5, minPoolSize: 0, serverSelectionTimeoutMS: 8_000 });
-    this.database = database;
-    this.now = now;
-    this.worldId = worldId;
-    // Logical JSON payload sizes for before/after comparisons, excluding BSON,
-    // transport framing and negotiated wire compression.
+  constructor(uri, database, now = Date.now, options = {}) {
+    this.uri = uri; this.database = database; this.now = now;
+    this.client = options.client || new MongoClient(uri, { maxPoolSize: 5, minPoolSize: 0, maxIdleTimeMS: 60_000, serverSelectionTimeoutMS: 10_000, connectTimeoutMS: 10_000 });
     this.metrics = { reads: 0, writes: 0, conflicts: 0, readBytes: 0, writeBytes: 0 };
   }
-
   async init() {
-    await this.client.connect();
-    this.collection = this.client.db(this.database).collection('worlds');
-    try {
-      const state = { _id: this.worldId, ...initialState(this.now()) };
-      await this.collection.insertOne(state);
-      this.metrics.writes++;
-      this.metrics.writeBytes += payloadBytes(state);
-    } catch (error) {
-      if (error.code !== 11000) throw error;
+    await this.client.connect(); const database = this.client.db(this.database);
+    this.players = database.collection('personalPlayers'); this.gifts = database.collection('personalGifts'); this.catalogs = database.collection('gameCatalog');
+    await Promise.all([
+      this.players.createIndex({ nameKey: 1 }, { unique: true }), this.players.createIndex({ tokenHashes: 1 }), this.players.createIndex({ presenceUntil: 1 }),
+      this.gifts.createIndex({ operationId: 1 }, { unique: true }), this.gifts.createIndex({ recipientId: 1, status: 1, createdAt: 1 }),
+    ]);
+    const existing = await this.catalogs.findOne({ _id: 'global' });
+    if (!existing) {
+      const legacy = await database.collection('worlds').findOne({ _id: 'shared' }); const catalog = ensurePersonalCatalog(getCatalog(legacy?.world));
+      try { await this.catalogs.updateOne({ _id: 'global' }, { $setOnInsert: { catalog, revision: catalog.revision, fence: 0, schemaVersion: 2 } }, { upsert: true }); }
+      catch (error) { if (error.code !== 11000) throw error; }
+    } else {
+      const catalog = ensurePersonalCatalog(existing.catalog);
+      if (JSON.stringify(catalog) !== JSON.stringify(existing.catalog)) await this.catalogs.updateOne({ _id: 'global', revision: existing.revision }, { $set: { catalog } });
     }
     return this;
   }
-
-  async fetchDocument(filter, projection) {
-    this.metrics.reads++;
-    let state;
-    try { state = await this.collection.findOne(filter, { projection: { _id: 0, ...projection } }); }
-    catch { throw storageError(); }
-    this.metrics.readBytes += payloadBytes(state);
-    return state;
+  async transaction(operation) {
+    const session = this.client.startSession();
+    try { return await session.withTransaction(() => operation(new MongoContext(this, session)), { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' }, maxCommitTimeMS: 10_000 }); }
+    catch (error) { if (error.status || error.code === 11000 || !error.name?.startsWith('Mongo')) throw error; throw storageError(error); }
+    finally { await session.endSession(); }
   }
-
-  async read() {
-    const state = await this.fetchDocument({ _id: this.worldId });
-    if (!state) throw new Error('Die gemeinsame Welt wurde nicht gefunden.');
-    return state;
-  }
-
-  async world() {
-    const state = await this.fetchDocument({ _id: this.worldId }, { world: 1 });
-    if (!state) throw new Error('Die gemeinsame Welt wurde nicht gefunden.');
-    return state.world;
-  }
-
-  async playerForSession(hash) {
-    if (!sessionHash(hash)) return null;
-    const field = `sessions.${hash}`;
-    const state = await this.fetchDocument({ _id: this.worldId, [field]: { $exists: true } }, { [field]: 1, 'world.players': 1 });
-    return sessionPlayer(state, hash);
-  }
-
-  async commandContext(hash) {
-    if (!sessionHash(hash)) return emptyContext();
-    const field = `sessions.${hash}`;
-    return await this.fetchDocument({ _id: this.worldId, [field]: { $exists: true } }, { [field]: 1, 'world.players': 1, 'world.cards': 1 }) || emptyContext();
-  }
-
-  async revision() {
-    const state = await this.fetchDocument({ _id: this.worldId }, { 'world.revision': 1 });
-    if (!state) throw new Error('Die gemeinsame Welt wurde nicht gefunden.');
-    return state.world.revision;
-  }
-
-  async mutate(change) {
-    for (let attempt = 0; attempt < 12; attempt++) {
-      const previous = await this.read();
-      const draft = structuredClone(previous);
-      const before = previous.world;
-      const result = await change(draft);
-      if (result?.changed === false) return { world: before, before, result: result.value, changed: false };
-      draft.world.revision = before.revision + 1;
-      let update;
-      try {
-        const filter = { _id: this.worldId, 'world.revision': before.revision };
-        const changes = mongoUpdate(previous, draft);
-        this.metrics.writeBytes += payloadBytes({ filter, update: changes });
-        update = await this.collection.updateOne(filter, changes);
-      } catch { throw storageError(); }
-      if (update.modifiedCount === 1) {
-        this.metrics.writes++;
-        return { world: draft.world, before, result: result?.value, changed: true };
-      }
-      this.metrics.conflicts++;
-    }
-    const error = new Error('Die Welt ist gerade beschäftigt. Bitte versuche die Aktion erneut.');
-    error.status = 409;
-    throw error;
-  }
-
+  async read(operation) { try { return await operation(new MongoContext(this)); } catch (error) { if (error.status) throw error; throw storageError(error); } }
   async close() { await this.client.close(); }
 }
 
 export async function createRepository(config, now) {
-  try {
-    const repository = config.mongoUri
-      ? new MongoRepository(config.mongoUri, config.mongoDatabase, now, config.worldId)
-      : new FileRepository(config.worldFile, now);
-    return await repository.init();
-  } catch (error) {
-    if (config.mongoUri) throw storageError(error);
-    throw error;
-  }
+  const repository = config.mongoUri ? new MongoRepository(config.mongoUri, config.mongoDatabase, now) : new FileRepository(config.worldFile, now, { legacyFilename: config.legacyWorldFile });
+  try { return await repository.init(); }
+  catch (error) { await repository.close().catch(() => {}); if (config.mongoUri) throw storageError(error); throw error; }
 }

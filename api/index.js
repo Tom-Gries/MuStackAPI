@@ -1,8 +1,8 @@
 import { createGameServer } from '../server/app.js';
 import { startupErrorCode } from '../server/startup-error.js';
 
-// Vercel's Node runtime accepts an http.Server and forwards WebSocket upgrades.
-// Route every /api/* request to this function, including /api/socket itself.
+// One reusable Node HTTP server handles short requests for personal worlds.
+// Vercel routes every /api/* request to this function.
 const game = await createGameServer().catch((error) => {
   const code = startupErrorCode(error);
   // Never log the original driver error: it can include connection credentials.

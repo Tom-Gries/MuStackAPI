@@ -31,7 +31,7 @@ export function startupErrorCode(error) {
   const codeIs = (entry, code) => entry.code === code || entry.code === String(code);
   if (errors.some((entry) => message(entry).startsWith('Für den Cloudbetrieb ist MONGODB_URI erforderlich.'))) return 'MONGODB_URI_MISSING';
   if (errors.some((entry) => entry.name === 'MongoParseError' || message(entry).startsWith('MONGODB_URI enthält Platzhalter.'))) return 'MONGODB_URI_INVALID';
-  if (errors.some((entry) => /^API_ORIGIN (muss|benötigt) /.test(message(entry)))) return 'API_ORIGIN_INVALID';
+  if (errors.some((entry) => /^APP_ORIGIN muss /.test(message(entry)))) return 'APP_ORIGIN_INVALID';
   if (errors.some((entry) => codeIs(entry, 18) || codeIs(entry, 8000) && /\b(?:bad auth|authentication failed|authentication failure|auth failed)\b/i.test(message(entry)))) return 'MONGODB_AUTH_FAILED';
   if (errors.some((entry) => codeIs(entry, 13))) return 'MONGODB_ACCESS_DENIED';
   if (errors.some((entry) => ['ENOTFOUND', 'ENODATA', 'EAI_AGAIN', 'ESERVFAIL'].includes(entry.code))) return 'MONGODB_DNS_FAILED';

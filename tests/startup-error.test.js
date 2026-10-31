@@ -8,10 +8,10 @@ function thrown(callback) {
   assert.fail('Expected configuration failure');
 }
 
-test('startup codes distinguish missing credentials, URI placeholders and invalid API origins', () => {
+test('startup codes distinguish missing credentials and URI placeholders', () => {
   assert.equal(startupErrorCode(thrown(() => readConfig({ VERCEL: '1' }))), 'MONGODB_URI_MISSING');
   assert.equal(startupErrorCode(thrown(() => resolveMongoUri({ MONGODB_URI: 'mongodb+srv://<username>:<password>@cluster.invalid/' }))), 'MONGODB_URI_INVALID');
-  assert.equal(startupErrorCode(thrown(() => readConfig({ API_ORIGIN: 'http://example.invalid' }))), 'API_ORIGIN_INVALID');
+  assert.equal(startupErrorCode(thrown(() => readConfig({ APP_ORIGIN: 'not-a-url' }))), 'APP_ORIGIN_INVALID');
   assert.equal(startupErrorCode(Object.assign(new Error('URI includes private data'), { name: 'MongoParseError' })), 'MONGODB_URI_INVALID');
 });
 

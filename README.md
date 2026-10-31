@@ -1,6 +1,6 @@
 # StackFriends – API
 
-[MuStackAPI](https://github.com/Tom-Gries/MuStackAPI) enthält das Node.js-Backend. Das Spiel liegt in [MuStack](https://github.com/Tom-Gries/MuStack), die gemeinsamen Spielregeln in [MuStackShared](https://github.com/Tom-Gries/MuStackShared). Jedes Repository hat seine eigene Git-Historie.
+[MuStackAPI](https://github.com/Tom-Gries/MuStackAPI) enthält die Node.js-API. [MuStack](https://github.com/Tom-Gries/MuStack) enthält das Spiel und [MuStackShared](https://github.com/Tom-Gries/MuStackShared) die gemeinsamen Regeln. Jedes Repository wird separat versioniert.
 
 ## Lokal entwickeln
 
@@ -11,52 +11,54 @@ npm ci
 npm run dev:local
 ```
 
-Die API läuft auf http://127.0.0.1:3001. Der lokale Modus verwendet `.data/world.json` und ignoriert die Cloud-Zugangsdaten, selbst wenn sie in `.env.local` stehen. Das Frontend separat mit `npm run dev` im Frontend-Ordner starten.
+Die API läuft auf http://127.0.0.1:3001. Der lokale Modus speichert persönliche Welten in `.data/personal-worlds.json` und ignoriert Cloud-Zugangsdaten. Das Frontend separat mit `npm run dev` starten. `npm run dev` beziehungsweise `npm start` im Backend verwenden dagegen `.env.local` und die konfigurierte MongoDB.
 
-`npm run dev` und `npm start` verwenden die Konfiguration aus `.env.local` beziehungsweise der Umgebung. Für die gemeinsame lokale Vorschau zuerst das Frontend mit `npm run build` bauen und anschließend hier `npm run preview:local` starten. Sie läuft auf http://localhost:3003 mit der lokalen Dateiwelt; `FRONTEND_DIST` kann auf einen anderen fertigen Frontend-Build zeigen.
+Für die lokale Vorschau zuerst das Frontend bauen und anschließend `npm run preview:local` starten. Das Spiel läuft dann auf http://localhost:3003. `FRONTEND_DIST` kann auf einen anderen fertigen Frontend-Build zeigen.
 
-## Konfiguration
+## Konfiguration und Vercel
 
-Lokale Einstellungen gehören in die ignorierte Datei `.env.local`; `.env.example` dient als Vorlage. Bei Vercel diese zwei Pflichtvariablen im API-Projekt setzen:
+Lokale Zugangsdaten gehören in die ignorierte Datei `.env.local`; `.env.example` enthält die Vorlage. Dieses Repository bei Vercel als eigenes Projekt mit Framework **Other** importieren. Root Directory ist der Repository-Hauptordner.
 
 | Pflichtvariable | Wert |
 | --- | --- |
 | `MONGODB_URI` | Vollständige MongoDB-Atlas-Verbindungsadresse einschließlich Zugangsdaten. |
-| `APP_ORIGIN` | Genaue öffentliche Frontend-Adresse einschließlich `https://`. |
+| `APP_ORIGIN` | Öffentliche Frontend-Adresse einschließlich `https://`. |
 
-MongoDB speichert den dauerhaften Spielstand und koordiniert Nachrichten, Anwesenheit, Kartenreservierungen und Einmaltickets zwischen laufenden API-Instanzen. Nachrichten werden über MongoDB Change Streams übertragen. Ein zusätzlicher Datenbank- oder Nachrichtenserver ist nicht erforderlich.
+Im Frontend-Projekt wird `BACKEND_URL` auf die öffentliche API-Adresse gesetzt. Optional ändern `MONGODB_DB` den Datenbanknamen (Standard `StackFriends-dev`), `PORT` den lokalen Port und `WORLD_FILE` die lokale Speicherdatei. Es gibt keine Redis-, WebSocket- oder Push-Service-Konfiguration. Shared ist eine Bibliothek und braucht kein Vercel-Projekt.
 
-Bewegungsvorschauen erzeugen dabei begrenzte, kurzlebige MongoDB-Datensätze. TTL-Indizes räumen Nachrichten und abgelaufene Verbindungsdaten auf. Pro API-Prozess läuft höchstens ein Change Stream; er wird geschlossen, sobald dort keine Spieler mehr verbunden sind. Die Browser erhalten Änderungen weiterhin über ihre Sockets.
+## Persönliche Welten und kurze HTTP-Aufrufe
 
-Der Datenbanknutzer benötigt Lese- und Schreibrechte einschließlich `changeStream` und `find` auf der Spieldatenbank. Die übliche Rolle `readWrite` enthält diese Rechte. Siehe [MongoDB Change Streams](https://www.mongodb.com/docs/manual/changestreams/#access-control) und [MongoDB-Rollen](https://www.mongodb.com/docs/manual/reference/built-in-roles/#readwrite).
+Jeder Name hat eine eigene Welt mit einer Menschenkarte und neun Goldkarten. Ein HttpOnly-Cookie merkt den Zugang. Die Anmeldung mit einem bestehenden Namen öffnet dessen Welt; Namen sind absichtlich nicht zusätzlich geschützt.
 
-Optional legt `MONGODB_DB` den Datenbanknamen fest; der Standard ist `StackFriends-dev`. `API_ORIGIN` kann die öffentliche API-Adresse für direkte WebSocket-Verbindungen festlegen. Lokal kann `PORT` den Standardport 3001 ersetzen und `WORLD_FILE` den Pfad zur Dateiwelt. Zugangsdaten werden ausschließlich im Backend hinterlegt und nicht in Git eingecheckt.
+Abgeschlossene Aktionen werden über `/api/command` gespeichert. Ziehbewegungen und Animationen erzeugen keine laufenden Netzwerknachrichten. Laufende Arbeiten und Kämpfe werden an ihren tatsächlichen Ereigniszeitpunkten mit `/api/sync` fortgesetzt. Es gibt keine Server-Timer, Sockets oder MongoDB Change Streams.
 
-## Prüfen
+Im sichtbaren Spiel erneuert ein kleines `/api/presence`-Lebenszeichen etwa jede Minute den Onlinestatus, ohne die Welt zu lesen. Nur wenn weitere Spieler online sind, läuft der regelmäßige vollständige Abgleich. Ein im Profil vermerkter Geschenkeingang löst ebenfalls einen Abgleich aus, damit der Empfänger das Geschenk erhält, selbst wenn der Absender bereits gegangen ist. Wiederöffnen und Sichtbarwerden gleichen immer einmal ab. Ein geschlossenes Spiel stellt keine Anfragen.
+
+Ein Rathaus wird aus 100 Steinen mit einem Menschen in 60 Sekunden hergestellt. Es öffnet die Spielerliste, Materialansicht und Geschenkfunktion. Die drei Social-Endpunkte prüfen das Rathaus serverseitig. Online-Hinweise erscheinen nur bei geöffnetem Spiel mit eigenem Rathaus.
+
+Geschenke werden serverseitig aus der tatsächlichen Kartenauswahl erzeugt. Eine MongoDB-Transaktion zieht sie ab und legt sie im Empfängerpostfach ab. Eine weitere Transaktion stellt sie mit neuen IDs zu und markiert den Eingang als erledigt. Aktions-IDs verhindern doppelte Verarbeitung nach Wiederholungen. Menschen, Leichen, angreifende Kreaturen und gerade beschäftigte oder ausgerüstete Karten werden abgelehnt.
+
+Die Spielzeit pausiert beim Verlassen. Separate Browser-Tabs besitzen eigene begrenzte Leases; ein geschlossener Tab beendet die anderen nicht. Bei einem abrupten Abbruch läuft höchstens die kurze Aktivitätsfrist aus. Echtzeitwachstum bleibt davon unabhängig.
+
+## Daten und Editor
+
+MongoDB verwendet `personalPlayers`, `personalGifts` und den globalen Inhaltskatalog `gameCatalog`. Der Editor ändert weiterhin Karten, Rezepte und Pakete für alle Welten. Prüfungen berücksichtigen auch offline gespeicherte Welten und ausstehende Geschenke.
+
+Beim ersten Start wird ein vorhandener Inhaltskatalog aus der früheren gemeinsamen Welt übernommen. Spielfortschritt wird nicht in persönliche Welten kopiert. Die Migration löscht den alten Stand nicht automatisch; der einmalige Wechsel mit ausdrücklich gewünschter Löschung wird separat ausgeführt. Bilder liegen im Frontend-Repository.
+
+## Prüfen und Regelversion aktualisieren
 
 ```sh
 npm test
 npm run check
 ```
 
-Die API-Tests prüfen Speicherung, Sitzung, Echtzeitverbindungen und die Zusammenarbeit mehrerer Instanzen. Installation, Tests und CI benötigen keinen weiteren lokalen Checkout. Die eigentlichen Spielregeltests liegen im Shared-Repository.
+Die Tests verwenden isolierte lokale Dateien und MongoDB-Fixtures. Sie benötigen keine Atlas-Zugangsdaten. Die Spielregeltests liegen im Shared-Repository.
 
-Die MongoDB-Tests verwenden eine isolierte Datenbank-Fixture und brauchen keine Atlas-Zugangsdaten. Sie ersetzen keinen Verbindungstest mit dem tatsächlich konfigurierten Cluster.
-
-## Gemeinsame Spielregeln
-
-Beide Apps beziehen `@stackfriends/shared` als öffentliches HTTPS-Archiv aus dem Shared-Repository. Dieselbe vollständige Commit-SHA mit 40 Zeichen legt ihre gemeinsame Regelversion fest; `package.json` und `package-lock.json` werden mitcommittet. Die Lockdatei enthält auch die Integritätsprüfung des Archivs.
-
-Regeln zuerst im Shared-Repository ändern, mit `npm test` prüfen und committen/pushen. Danach in API und Frontend jeweils die neue SHA einsetzen:
+Beide Anwendungen installieren dieselbe feste Shared-Version als öffentliches HTTPS-Archiv eines vollständigen Git-Commits. Nach Shared-Änderungen dort testen, committen und pushen; anschließend in beiden Apps installieren:
 
 ```sh
 npm install '@stackfriends/shared@https://codeload.github.com/Tom-Gries/MuStackShared/tar.gz/<commit-sha>'
 ```
 
-Anschließend beide Apps prüfen und ihre jeweiligen Änderungen committen/pushen. `npm ci` lädt die festgelegte öffentliche Version automatisch. Ein lokaler Shared-Checkout, Kopierschritte und zusätzliche Zugangsdaten werden für Builds nicht benötigt.
-
-## Vercel
-
-Dieses Repository als eigenes Projekt mit Framework **Other** importieren. Root Directory ist der Repository-Hauptordner. `vercel.json` enthält den Node-/WebSocket-Einstieg `api/socket.js`; Fluid Compute muss aktiv sein.
-
-Die zwei Pflichtvariablen aus der Konfiguration im API-Projekt setzen. Im Frontend-Projekt wird zusätzlich `BACKEND_URL` auf die API-Adresse gesetzt. Das Shared-Paket ist eine Bibliothek und erhält kein eigenes Vercel-Deployment.
+`package.json` und `package-lock.json` werden mitcommittet. Ein unabhängiger `npm ci` benötigt keine weiteren lokalen Checkouts oder Zugangstoken.

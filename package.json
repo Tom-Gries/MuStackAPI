@@ -16,11 +16,10 @@
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "@stackfriends/shared": "https://codeload.github.com/Tom-Gries/MuStackShared/tar.gz/2e737f08934f255894ec43673f2f7ae30ab68cf6",
+    "@stackfriends/shared": "https://codeload.github.com/Tom-Gries/MuStackShared/tar.gz/cb28f9b61c723a792b78eac5f2c5871014aac11f",
     "cookie": "^1.0.2",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
-    "mongodb": "^6.16.0",
-    "ws": "^8.18.0"
+    "mongodb": "^6.16.0"
   }
 }
