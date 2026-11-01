@@ -163,6 +163,56 @@ test('presence heartbeat avoids loading/saving world and has no game timers', as
   assert.equal(service.realtime, undefined);
 });
 
+test('response timestamps include database and commit latency without advancing the saved simulation boundary', async (t) => {
+  const { service, advance, now } = await fixture(t);
+  const transaction = service.repository.transaction.bind(service.repository), read = service.repository.read.bind(service.repository);
+  const delayed = (run) => async (operation) => {
+    const result = await run(async (context) => {
+      const presencePlayers = context.presencePlayers.bind(context);
+      context.presencePlayers = async (...args) => { const players = await presencePlayers(...args); advance(100); return players; };
+      return operation(context);
+    });
+    advance(200); // Commit/read completion happens after the response was built.
+    return result;
+  };
+  service.repository.transaction = delayed(transaction);
+  service.repository.read = delayed(read);
+  service.onPlayerOnline = async () => { advance(50); };
+
+  const joinedAt = now(), a = await service.join('A');
+  assert.equal(a.serverTime, joinedAt + 350);
+  assert.equal(a.serverTime, now());
+  assert.equal(a.world.clock.lastAt, joinedAt);
+  const b = await service.join('B');
+  await hall(service, a.player.id);
+
+  const actions = [
+    () => service.sync(a.token),
+    () => service.execute(a.token, { type: 'move', cardId: a.player.cardId, x: 1100, y: 700 }, 'timestamp-move-1'),
+    () => service.gift(a.token, { recipientId: b.player.id, cardId: a.world.cards.find((card) => card.type === 'gold').id, takeAbove: false, commandId: 'timestamp-gift-1' }),
+  ];
+  let simulationBoundary;
+  for (const action of actions) {
+    simulationBoundary = now();
+    const response = await action();
+    assert.equal(response.serverTime, simulationBoundary + 300);
+    assert.equal(response.serverTime, now());
+    assert.equal(response.world.clock.lastAt, simulationBoundary);
+    const saved = await read((context) => context.playerById(a.player.id));
+    assert.equal(saved.world.clock.lastAt, simulationBoundary);
+  }
+
+  const presenceAt = now(), presence = await service.presence(a.token);
+  assert.equal(presence.serverTime, presenceAt + 300);
+  assert.equal(presence.serverTime, now());
+  assert.equal((await read((context) => context.playerById(a.player.id))).world.clock.lastAt, simulationBoundary);
+
+  const snapshotAt = now(), snapshot = await service.snapshot(a.token);
+  assert.equal(snapshot.serverTime, snapshotAt + 300);
+  assert.equal(snapshot.serverTime, now());
+  assert.equal(snapshot.world.clock.lastAt, simulationBoundary);
+});
+
 test('client epochs ignore delayed pause after resume and old commands after hiding', async (t) => {
   const { service, advance } = await fixture(t), initial = { id: 'tab-a', epoch: 0, active: true }, a = await service.join('A', initial);
   advance(1000); await service.sync(a.token, false, { ...initial, epoch: 1, active: false });

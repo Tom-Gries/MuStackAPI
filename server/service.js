@@ -70,6 +70,9 @@ export class GameService {
       try { await this.onPlayerOnline(result.player); } catch { /* Gameplay remains available if optional notifications fail. */ }
     }
     delete result.becameOnline;
+    // The simulation boundary predates database/commit work. Advertise the
+    // actual response time so clients do not subtract that work from animation.
+    result.serverTime = this.now();
     return result;
   }
   overlay(player, catalog, now) {
@@ -111,11 +114,15 @@ export class GameService {
   }
   async snapshot(token) {
     if (!hashToken(token)) return { player: null, world: null, mode: this.config.mode, serverTime: this.now(), syncIntervalMs: SYNC_INTERVAL_MS, presenceIntervalMs: SYNC_INTERVAL_MS, onlinePlayers: [], hasOtherPlayersOnline: false };
-    try { return await this.repository.read(async (context) => {
-      const player = await this.requirePlayer(context, token), catalog = await context.catalog();
-      player.world.catalog = catalog;
-      return this.response(context, player, this.now());
-    }); }
+    try {
+      const result = await this.repository.read(async (context) => {
+        const player = await this.requirePlayer(context, token), catalog = await context.catalog();
+        player.world.catalog = catalog;
+        return this.response(context, player, this.now());
+      });
+      result.serverTime = this.now();
+      return result;
+    }
     catch (error) { if (error.status === 401) return this.snapshot(); throw error; }
   }
   async join(input, clientId) {
