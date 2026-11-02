@@ -132,7 +132,7 @@ test('two tabs cannot lose independent completed actions and hiding one does not
   assert.equal(result.onlinePlayers.length, 1);
 });
 
-test('offline world time pauses, real growth continues once, and session reads do not reactivate leases', async (t) => {
+test('cookie sessions catch up real growth and work time without reactivating leases', async (t) => {
   const { service, advance, now } = await fixture(t), a = await service.join('A', 'tab-a');
   await edit(service, a.player.id, (world) => {
     const soil = addCard(world, 'soil', 900, 500), berry = addCard(world, 'berry', 1100, 500);
@@ -142,19 +142,21 @@ test('offline world time pauses, real growth continues once, and session reads d
   await service.execute(a.token, { type: 'move', cardId: world.testBerry, targetId: world.testSoil, x: 900, y: 500 }, 'grow-start-1', 'tab-a');
   advance(5000); const paused = await service.sync(a.token, false, 'tab-a');
   advance(2 * 86_400_000); const session = await service.snapshot(a.token);
-  assert.equal(session.world.clock.elapsed, paused.world.clock.elapsed);
+  assert.equal(session.world.clock.elapsed, paused.world.clock.elapsed + 2 * 86_400_000);
+  assert.equal(session.world.cards.filter((card) => card.type === 'field').length, 1);
+  assert.equal(session.onlinePlayers.length, 0);
   const resumed = await service.sync(a.token, true, 'tab-a');
-  assert.equal(resumed.world.clock.elapsed, paused.world.clock.elapsed);
+  assert.equal(resumed.world.clock.elapsed, session.world.clock.elapsed);
   assert.equal(resumed.world.cards.filter((card) => card.type === 'field').length, 1);
   assert.ok(resumed.world.cards.find((card) => card.type === 'field').readyAt < now());
 });
 
 test('presence heartbeat avoids loading/saving world and has no game timers', async (t) => {
   const events = [], { service, advance } = await fixture(t, { onPlayerOnline: (player) => events.push(player.id) }), a = await service.join('A', 'tab-a');
-  const before = (await service.snapshot(a.token)).world;
+  const before = await service.repository.read(async (context) => (await context.playerById(a.player.id)).world);
   advance(60_000); const presence = await service.presence(a.token, true, 'tab-a');
   assert.ok(!('world' in presence));
-  assert.deepEqual((await service.snapshot(a.token)).world, before);
+  assert.deepEqual(await service.repository.read(async (context) => (await context.playerById(a.player.id)).world), before);
   assert.equal(events.length, 1);
   await service.presence(a.token, false, 'tab-a');
   await service.sync(a.token, true, 'tab-a');
@@ -210,7 +212,7 @@ test('response timestamps include database and commit latency without advancing 
   const snapshotAt = now(), snapshot = await service.snapshot(a.token);
   assert.equal(snapshot.serverTime, snapshotAt + 300);
   assert.equal(snapshot.serverTime, now());
-  assert.equal(snapshot.world.clock.lastAt, simulationBoundary);
+  assert.equal(snapshot.world.clock.lastAt, snapshotAt);
 });
 
 test('client epochs ignore delayed pause after resume and old commands after hiding', async (t) => {
@@ -220,16 +222,16 @@ test('client epochs ignore delayed pause after resume and old commands after hid
   advance(1000); const delayedPause = await service.presence(a.token, false, { ...initial, epoch: 1, active: false });
   assert.equal(delayedPause.onlinePlayers.length, 1);
   advance(1000); const active = await service.sync(a.token, true, { ...initial, epoch: 2 });
-  assert.equal(active.world.clock.elapsed, 3000);
+  assert.equal(active.world.clock.elapsed, 4000);
   await service.sync(a.token, false, { ...initial, epoch: 3, active: false });
   advance(10_000);
   const lateCommand = await service.execute(a.token, { type: 'move', cardId: a.player.cardId, x: 1100, y: 700 }, 'late-command-01', { ...initial, epoch: 2 });
   assert.equal(lateCommand.onlinePlayers.length, 0);
-  assert.equal(lateCommand.world.clock.elapsed, active.world.clock.elapsed);
+  assert.equal(lateCommand.world.clock.elapsed, active.world.clock.elapsed + 10_000);
   const sameEpoch = await service.presence(a.token, true, { ...initial, epoch: 3 });
   assert.equal(sameEpoch.onlinePlayers.length, 0);
   advance(10_000); const resumed = await service.sync(a.token, true, { ...initial, epoch: 4 });
-  assert.equal(resumed.world.clock.elapsed, active.world.clock.elapsed);
+  assert.equal(resumed.world.clock.elapsed, active.world.clock.elapsed + 20_000);
 });
 
 test('catalog edits are global while protecting offline worlds, pending gifts and partial pack payments', async (t) => {

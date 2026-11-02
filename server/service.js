@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { applyCommand, advanceWorld, nextWakeAt, publicWorld } from '@stackfriends/shared/game.js';
+import { applyCommand, advancePersonalWorld, nextWakeAt, publicWorld } from '@stackfriends/shared/game.js';
 import { getCatalog, validateCatalog } from '@stackfriends/shared/catalog.js';
 import { createPersonalWorld, summarizeMaterials, takeGiftCards, receiveGiftCards } from '@stackfriends/shared/personal-world.js';
 import { MAX_COMMANDS, SYNC_INTERVAL_MS, ACTIVE_LEASE_MS, PRESENCE_LEASE_MS } from './config.js';
@@ -102,7 +102,7 @@ export class GameService {
     const result = await this.repository.transaction(async (context) => {
       const player = await this.requirePlayer(context, token), catalog = await context.catalog();
       this.overlay(player, catalog, now);
-      advanceWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
+      advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
       const giftMessages = await this.collectGifts(context, player, now);
       const extra = operation ? await operation(context, player, catalog, now) : {};
       const becameOnline = this.touch(player, now, active, clientId);
@@ -115,10 +115,19 @@ export class GameService {
   async snapshot(token) {
     if (!hashToken(token)) return { player: null, world: null, mode: this.config.mode, serverTime: this.now(), syncIntervalMs: SYNC_INTERVAL_MS, presenceIntervalMs: SYNC_INTERVAL_MS, onlinePlayers: [], hasOtherPlayersOnline: false };
     try {
-      const result = await this.repository.read(async (context) => {
+      const now = this.now();
+      const result = await this.repository.transaction(async (context) => {
         const player = await this.requirePlayer(context, token), catalog = await context.catalog();
-        player.world.catalog = catalog;
-        return this.response(context, player, this.now());
+        const before = JSON.stringify(player.world);
+        this.overlay(player, catalog, now);
+        advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
+        if (JSON.stringify(player.world) !== before) {
+          player.revision++; player.world.revision++; player.lastSavedAt = now;
+          await context.savePlayer(player);
+        }
+        // Loading a cookie catches up production, but does not activate a tab
+        // or claim queued gifts before the explicit visible-world sync.
+        return this.response(context, player, now);
       });
       result.serverTime = this.now();
       return result;
@@ -138,7 +147,7 @@ export class GameService {
             player.world = createPersonalWorld({ id: player._id, name, nameKey }, catalog, now);
           } else {
             this.overlay(player, catalog, now);
-            advanceWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
+            advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
           }
           player.tokenHashes = [...player.tokenHashes, hashToken(token)].slice(-32);
           const giftMessages = await this.collectGifts(context, player, now), becameOnline = this.touch(player, now, true, clientId);

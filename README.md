@@ -32,13 +32,13 @@ Jeder Name hat eine eigene Welt mit einer Menschenkarte und neun Goldkarten. Ein
 
 Abgeschlossene Aktionen werden über `/api/command` gespeichert. Ziehbewegungen und Animationen erzeugen keine laufenden Netzwerknachrichten. Laufende Arbeiten und Kämpfe werden an ihren tatsächlichen Ereigniszeitpunkten mit `/api/sync` fortgesetzt. Es gibt keine Server-Timer, Sockets oder MongoDB Change Streams.
 
-Im sichtbaren Spiel erneuert ein kleines `/api/presence`-Lebenszeichen etwa jede Minute den Onlinestatus, ohne die Welt zu lesen. Nur wenn weitere Spieler online sind, läuft der regelmäßige vollständige Abgleich. Ein im Profil vermerkter Geschenkeingang löst ebenfalls einen Abgleich aus, damit der Empfänger das Geschenk erhält, selbst wenn der Absender bereits gegangen ist. Wiederöffnen und Sichtbarwerden gleichen immer einmal ab. Ein geschlossenes Spiel stellt keine Anfragen.
+Im sichtbaren Spiel erneuert ein kleines `/api/presence`-Lebenszeichen etwa jede Minute den Onlinestatus, ohne die Welt zu lesen. Nur wenn weitere Spieler online sind, läuft der regelmäßige vollständige Abgleich. Ein im Profil vermerkter Geschenkeingang löst ebenfalls einen Abgleich aus, damit der Empfänger das Geschenk erhält, selbst wenn der Absender bereits gegangen ist. Wiederöffnen und Sichtbarwerden gleichen einmal ab. Mehrere gleichzeitig angeforderte Abgleiche teilen sich eine Anfrage; ein wartender Hintergrundabgleich wird ausgelassen, falls eine vorherige Aktion seinen Termin bereits verarbeitet hat. Ein geschlossenes Spiel stellt keine Anfragen.
 
 Ein Rathaus wird aus 100 Steinen mit einem Menschen in 60 Sekunden hergestellt. Es öffnet die Spielerliste, Materialansicht und Geschenkfunktion. Die drei Social-Endpunkte prüfen das Rathaus serverseitig. Online-Hinweise erscheinen nur bei geöffnetem Spiel mit eigenem Rathaus.
 
 Geschenke werden serverseitig aus der tatsächlichen Kartenauswahl erzeugt. Eine MongoDB-Transaktion zieht sie ab und legt sie im Empfängerpostfach ab. Eine weitere Transaktion stellt sie mit neuen IDs zu und markiert den Eingang als erledigt. Aktions-IDs verhindern doppelte Verarbeitung nach Wiederholungen. Menschen, Leichen, angreifende Kreaturen und gerade beschäftigte oder ausgerüstete Karten werden abgelehnt.
 
-Die Spielzeit pausiert beim Verlassen. Separate Browser-Tabs besitzen eigene begrenzte Leases; ein geschlossener Tab beendet die anderen nicht. Bei einem abrupten Abbruch läuft höchstens die kurze Aktivitätsfrist aus. Echtzeitwachstum bleibt davon unabhängig.
+Beim Wiederöffnen werden begonnene Abbau- und Herstellungsarbeiten anhand der vergangenen Zeit nachgeholt. Mehrere Quellen werden nacheinander verarbeitet, Werkzeugboni gelten auch offline, und verbrauchte Quellen verschwinden. Das geschieht einmal beim nächsten Zugriff, ohne laufenden Serverprozess während der Abwesenheit. Kämpfe und Kreaturbewegungen bleiben in der abwesenden Zeit pausiert; Erdbeerwachstum verwendet weiterhin Echtzeit. Separate Browser-Tabs besitzen eigene begrenzte Anwesenheits-Leases; ein geschlossener Tab beendet die anderen nicht.
 
 ## Daten und Editor
 
