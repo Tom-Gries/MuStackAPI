@@ -48,3 +48,40 @@ test('HTTP heartbeat is a small profile response; command IDs and authentication
   assert.equal((await post('/api/sync', {})).status, 401);
   assert.equal((await fetch(`${base}/api/players`, { headers: { Cookie: cookie } })).status, 403);
 });
+
+test('HTTP local load/save routes use the same cookie and return revision acks without a board', async (t) => {
+  const { post, advance, now } = await httpFixture(t);
+  assert.equal((await (await post('/api/load', { simulation: 'local' })).json()).world, null);
+  const joined = await post('/api/join', { name: 'Browser', simulation: 'local', clientId: 'browser-tab', clientEpoch: 1, active: true });
+  const state = await joined.json(), cookie = joined.headers.get('set-cookie').split(';')[0];
+  advance(60_000);
+  const loaded = await (await post('/api/load', { simulation: 'local', clientId: 'browser-tab', clientEpoch: 1, active: true }, cookie)).json();
+  assert.equal(loaded.world.clock.lastAt, state.world.clock.lastAt);
+  assert.equal(loaded.world.revision, state.world.revision);
+  const body = { simulation: 'local', saveId: 'http-local-save', baseRevision: loaded.world.revision, operations: [{ kind: 'command', at: now(), activeUntil: now(), command: { type: 'move', cardId: state.player.cardId, x: 1000, y: 800 } }], clientId: 'browser-tab', clientEpoch: 1, active: true };
+  const response = await post('/api/save', body, cookie), saved = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(Object.hasOwn(saved, 'world'), false);
+  assert.equal(saved.revision, state.world.revision + 1);
+  assert.equal(saved.saveId, body.saveId);
+  assert.equal(saved.catalogRevision, state.world.catalog.revision);
+  const synced = await (await post('/api/sync', { simulation: 'local', baseRevision: saved.revision, clientId: 'browser-tab', clientEpoch: 1, active: true }, cookie)).json();
+  assert.equal(synced.world.cards.find((card) => card.id === state.player.cardId).x, 1000);
+  assert.equal(synced.lastSave.id, body.saveId);
+});
+
+test('HTTP stale local saves expose a safe conflict payload and protected mutations stay guarded', async (t) => {
+  const { post, now } = await httpFixture(t), joined = await post('/api/join', { name: 'Browser', simulation: 'local' });
+  const state = await joined.json(), cookie = joined.headers.get('set-cookie').split(';')[0];
+  const body = { simulation: 'local', saveId: 'http-first-save', baseRevision: state.world.revision, operations: [{ kind: 'advance', at: now(), activeUntil: now() }] };
+  assert.equal((await post('/api/save', body, cookie)).status, 200);
+  const stale = await post('/api/save', { ...body, saveId: 'http-stale-save' }, cookie), error = await stale.json();
+  assert.equal(stale.status, 409);
+  assert.equal(error.code, 'WORLD_CONFLICT');
+  assert.equal(error.world.id, state.player.id);
+  assert.equal(error.player.id, state.player.id);
+  assert.ok(!JSON.stringify(error).includes(cookie));
+  assert.equal((await post('/api/save', body)).status, 401);
+  assert.equal((await post('/api/save', body, cookie, { Origin: 'https://unrelated.invalid' })).status, 403);
+  assert.equal((await post('/api/command', { simulation: 'local', baseRevision: error.revision, commandId: 'no-direct-local', command: { type: 'move', cardId: state.player.cardId, x: 500, y: 500 } }, cookie)).status, 400);
+});

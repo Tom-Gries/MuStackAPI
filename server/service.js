@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { applyCommand, advancePersonalWorld, nextWakeAt, publicWorld } from '@stackfriends/shared/game.js';
 import { getCatalog, validateCatalog } from '@stackfriends/shared/catalog.js';
 import { createPersonalWorld, summarizeMaterials, takeGiftCards, receiveGiftCards } from '@stackfriends/shared/personal-world.js';
+import { initializeLocalSimulation, replaySimulationBatch } from '@stackfriends/shared/local-simulation.js';
 import { MAX_COMMANDS, SYNC_INTERVAL_MS, ACTIVE_LEASE_MS, PRESENCE_LEASE_MS } from './config.js';
 import { createRepository } from './repository.js';
 
@@ -95,14 +96,136 @@ export class GameService {
     return messages;
   }
   async response(context, player, now, extra = {}) {
-    return { player: profile(player), world: publicWorld(player.world), mode: this.config.mode, serverTime: now, syncIntervalMs: SYNC_INTERVAL_MS, nextWakeAt: nextWakeAt(player.world, now), hasPendingGifts: (player.pendingGiftCount || 0) > 0, ...(await this.presenceInfo(context, player._id, now)), ...extra };
+    return { player: profile(player), world: publicWorld(player.world), mode: this.config.mode, serverTime: now, syncIntervalMs: SYNC_INTERVAL_MS, nextWakeAt: nextWakeAt(player.world, now), hasPendingGifts: (player.pendingGiftCount || 0) > 0, catalogRevision: getCatalog(player.world).revision, resumeActiveUntil: player.activeUntil || 0, lastSave: player.lastSave || null, ...(await this.presenceInfo(context, player._id, now)), ...extra };
+  }
+  conflict(player, code = 'WORLD_CONFLICT', catalog) {
+    const error = errorWithStatus(code === 'CATALOG_CHANGED' ? 'Die Spielregeln wurden geändert. Lade den aktuellen Stand, bevor du weiter speicherst.' : 'Diese Welt wurde in einer anderen Sitzung geändert. Dein lokaler Stand darf sie nicht überschreiben.', 409);
+    error.details = { code, world: publicWorld(player.world), player: profile(player), revision: player.world.revision, lastSave: player.lastSave || null, resumeActiveUntil: player.activeUntil || 0, ...(catalog ? { catalog } : {}) };
+    return error;
+  }
+  requireRevision(player, revision) {
+    if (!Number.isSafeInteger(revision) || revision < 0) throw errorWithStatus('Der Spielstand benötigt eine gültige Basisversion.');
+    if (player.world.revision !== revision) throw this.conflict(player);
+  }
+  async localAck(context, player, now, extra = {}) {
+    return { player: profile(player), mode: this.config.mode, serverTime: now, revision: player.world.revision, savedAt: player.lastSavedAt, lastSave: player.lastSave || null, resumeActiveUntil: player.activeUntil || 0, hasPendingGifts: (player.pendingGiftCount || 0) > 0, catalogRevision: await context.catalogRevision(), syncIntervalMs: SYNC_INTERVAL_MS, ...(await this.presenceInfo(context, player._id, now)), ...extra };
+  }
+  activities(world) { return { jobs: new Set(world.jobs.map((job) => job.id)), motions: new Map(world.cards.filter((card) => card.motion).map((card) => [card.id, JSON.stringify(card.motion)])) }; }
+  startNewActivitiesNow(world, previous, now) {
+    const delta = Math.max(0, now - world.clock.lastAt);
+    for (const job of world.jobs) if (!previous.jobs.has(job.id) && job.timeBase === 'world') { job.startedAt += delta; job.dueAt += delta; }
+    for (const card of world.cards) if (card.motion && JSON.stringify(card.motion) !== previous.motions.get(card.id)) card.motion.startedAt += delta;
+  }
+  /** Loading never advances a local browser's saved simulation or collects its inbox. */
+  async loadLocal(token, active = true, clientId) {
+    if (!hashToken(token)) return { player: null, world: null, mode: this.config.mode, serverTime: this.now(), syncIntervalMs: SYNC_INTERVAL_MS, presenceIntervalMs: SYNC_INTERVAL_MS, onlinePlayers: [], hasOtherPlayersOnline: false, lastSave: null, resumeActiveUntil: 0 };
+    try {
+      const now = this.now();
+      const result = await this.repository.transaction(async (context) => {
+        const player = await this.requirePlayer(context, token), catalog = await context.catalog(), resumeActiveUntil = player.activeUntil || 0;
+        const before = JSON.stringify(player.world), activities = this.activities(player.world);
+        this.overlay(player, catalog, now);
+        this.startNewActivitiesNow(player.world, activities, now);
+        const changed = JSON.stringify(player.world) !== before;
+        initializeLocalSimulation(player.world);
+        const becameOnline = this.touch(player, now, active, clientId);
+        player.localSimulation = true;
+        if (changed) { player.revision++; player.world.revision++; await context.savePlayer(player); }
+        else await context.updatePresence(player, { clients: player.clients, presenceUntil: player.presenceUntil, lastSeenAt: player.lastSeenAt, activeUntil: player.activeUntil, localSimulation: true });
+        return this.response(context, player, now, { becameOnline, resumeActiveUntil });
+      });
+      return this.notifyOnline(result);
+    } catch (error) { if (error.status === 401) return this.loadLocal(); throw error; }
+  }
+  async joinLocal(input, clientId) {
+    clientKey(clientId);
+    const name = validateName(input), nameKey = name.toLocaleLowerCase('de-DE'), token = randomBytes(32).toString('base64url'), now = this.now();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const result = await this.repository.transaction(async (context) => {
+          const catalog = await context.catalog();
+          let player = await context.playerByName(nameKey);
+          const isNew = !player;
+          if (!player) {
+            player = { _id: randomUUID(), name, nameKey, tokenHashes: [], commandIds: [], revision: 0, createdAt: now, lastSavedAt: now, activeUntil: now };
+            player.world = createPersonalWorld({ id: player._id, name, nameKey }, catalog, now);
+          }
+          const resumeActiveUntil = player.activeUntil || 0, before = JSON.stringify(player.world), activities = this.activities(player.world);
+          this.overlay(player, catalog, now);
+          this.startNewActivitiesNow(player.world, activities, now);
+          if (isNew || JSON.stringify(player.world) !== before) player.world.revision++;
+          initializeLocalSimulation(player.world);
+          player.tokenHashes = [...player.tokenHashes, hashToken(token)].slice(-32);
+          player.localSimulation = true;
+          const becameOnline = this.touch(player, now, true, clientId);
+          player.revision++;
+          await context.savePlayer(player);
+          return this.response(context, player, now, { token, giftMessages: [], becameOnline, resumeActiveUntil });
+        });
+        return this.notifyOnline(result);
+      } catch (error) { if (error.code !== 11000 || attempt === 2) throw error; }
+    }
+  }
+  async saveLocal(token, packet, clientId) {
+    if (!packet || typeof packet !== 'object' || Array.isArray(packet) || Object.hasOwn(packet, 'world')) throw errorWithStatus('Speichern benötigt lokale Spielaktionen, keinen hochgeladenen Weltstand.');
+    if (packet.active !== undefined && typeof packet.active !== 'boolean') throw errorWithStatus('Der Aktivitätsstatus muss wahr oder falsch sein.');
+    const active = packet.active ?? true;
+    const id = commandId(packet.saveId), requestHash = signature({ kind: 'local-save', baseRevision: packet.baseRevision, operations: packet.operations }), now = this.now();
+    const result = await this.repository.transaction(async (context) => {
+      const player = await this.requirePlayer(context, token);
+      const previous = player.commandIds.find((entry) => entry.id === id);
+      if (previous) {
+        if (previous.requestHash !== requestHash || previous.kind !== 'local-save') throw errorWithStatus('Diese Speicher-ID wurde bereits für andere Änderungen verwendet.', 409);
+        // A final keepalive may retry an already committed save with a newer
+        // activity epoch. Its world receipt stays the same; its tab can still close.
+        const becameOnline = this.touch(player, now, active, clientId);
+        await context.updatePresence(player, { clients: player.clients, presenceUntil: player.presenceUntil, lastSeenAt: player.lastSeenAt, activeUntil: player.activeUntil });
+        this.metrics.duplicateCommands++;
+        return this.localAck(context, player, now, { saveId: id, revision: previous.saveRevision, currentRevision: player.world.revision, duplicate: true, becameOnline });
+      }
+      this.requireRevision(player, packet.baseRevision);
+      const catalog = await context.catalog();
+      if (getCatalog(player.world).revision !== catalog.revision) throw this.conflict(player, 'CATALOG_CHANGED', catalog);
+      try { replaySimulationBatch(player.world, packet.operations, { playerId: player._id, maxTime: now + 5000 }); }
+      catch (error) { if (!error.status) error.status = 400; throw error; }
+      player.world.revision++; player.revision++; player.lastSavedAt = now; player.localSimulation = true;
+      player.lastSave = { id, revision: player.world.revision };
+      this.remember(player, id, requestHash, { kind: 'local-save', saveRevision: player.world.revision });
+      const becameOnline = this.touch(player, now, active, clientId);
+      await context.savePlayer(player);
+      this.metrics.acceptedCommands++;
+      return this.localAck(context, player, now, { saveId: id, becameOnline });
+    });
+    return this.notifyOnline(result);
+  }
+  /** Local barriers load saved changes; simulation continues only in the browser. */
+  async withLocalWorld(token, active, operation, clientId, options = {}) {
+    const now = this.now();
+    const result = await this.repository.transaction(async (context) => {
+      const player = await this.requirePlayer(context, token), catalog = await context.catalog();
+      const duplicate = options.duplicate ? await options.duplicate(context, player) : null;
+      if (duplicate) return this.response(context, player, now, { giftMessages: [], ...duplicate });
+      this.requireRevision(player, options.baseRevision);
+      const activities = this.activities(player.world);
+      this.overlay(player, catalog, now);
+      initializeLocalSimulation(player.world);
+      const giftMessages = await this.collectGifts(context, player, now);
+      const extra = operation ? await operation(context, player, catalog, now) : {};
+      // Receipt/catalog effects start now rather than at the last minute-save.
+      this.startNewActivitiesNow(player.world, activities, now);
+      const becameOnline = this.touch(player, now, active, clientId);
+      player.localSimulation = true; player.revision++; player.world.revision++; player.lastSavedAt = now;
+      await context.savePlayer(player);
+      return this.response(context, player, now, { giftMessages, becameOnline, ...extra });
+    });
+    return this.notifyOnline(result);
   }
   async withWorld(token, active, operation, clientId) {
     const now = this.now();
     const result = await this.repository.transaction(async (context) => {
       const player = await this.requirePlayer(context, token), catalog = await context.catalog();
       this.overlay(player, catalog, now);
-      advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
+      if (!player.localSimulation) advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
       const giftMessages = await this.collectGifts(context, player, now);
       const extra = operation ? await operation(context, player, catalog, now) : {};
       const becameOnline = this.touch(player, now, active, clientId);
@@ -120,7 +243,7 @@ export class GameService {
         const player = await this.requirePlayer(context, token), catalog = await context.catalog();
         const before = JSON.stringify(player.world);
         this.overlay(player, catalog, now);
-        advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
+        if (!player.localSimulation) advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
         if (JSON.stringify(player.world) !== before) {
           player.revision++; player.world.revision++; player.lastSavedAt = now;
           await context.savePlayer(player);
@@ -134,7 +257,8 @@ export class GameService {
     }
     catch (error) { if (error.status === 401) return this.snapshot(); throw error; }
   }
-  async join(input, clientId) {
+  async join(input, clientId, options = {}) {
+    if (options.localSimulation) return this.joinLocal(input, clientId);
     clientKey(clientId);
     const name = validateName(input), nameKey = name.toLocaleLowerCase('de-DE'), token = randomBytes(32).toString('base64url'), now = this.now();
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -147,7 +271,7 @@ export class GameService {
             player.world = createPersonalWorld({ id: player._id, name, nameKey }, catalog, now);
           } else {
             this.overlay(player, catalog, now);
-            advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
+            if (!player.localSimulation) advancePersonalWorld(player.world, now, { activeUntil: player.activeUntil || 0, rng: this.rng });
           }
           player.tokenHashes = [...player.tokenHashes, hashToken(token)].slice(-32);
           const giftMessages = await this.collectGifts(context, player, now), becameOnline = this.touch(player, now, true, clientId);
@@ -159,7 +283,7 @@ export class GameService {
       } catch (error) { if (error.code !== 11000 || attempt === 2) throw error; }
     }
   }
-  async sync(token, active = true, clientId) { this.metrics.synchronizations++; return this.withWorld(token, active, undefined, clientId); }
+  async sync(token, active = true, clientId, options = {}) { this.metrics.synchronizations++; return options.localSimulation ? this.withLocalWorld(token, active, undefined, clientId, options) : this.withWorld(token, active, undefined, clientId); }
   remember(player, id, requestHash, extra) { player.commandIds = [...player.commandIds, { id, requestHash, ...extra }].slice(-MAX_COMMANDS); }
   duplicate(player, id, requestHash) {
     const previous = player.commandIds.find((entry) => entry.id === id);
@@ -168,11 +292,13 @@ export class GameService {
     this.metrics.duplicateCommands++;
     return { message: previous.message, ...(previous.giftId ? { giftId: previous.giftId } : {}), duplicate: true };
   }
-  async execute(token, command, suppliedId, clientId) {
+  async execute(token, command, suppliedId, clientId, options = {}) {
     const id = commandId(suppliedId);
     if (!command || typeof command !== 'object' || Array.isArray(command)) throw errorWithStatus('Die Spielaktion ist ungültig.');
+    if (options.localSimulation && command.type !== 'catalog-save') throw errorWithStatus('Lokale Spielaktionen werden gemeinsam über den Speicher-Endpunkt gesichert.');
     const requestHash = signature({ kind: 'command', command });
-    return this.withWorld(token, true, async (context, player, catalog) => {
+    const mutate = options.localSimulation ? this.withLocalWorld.bind(this) : this.withWorld.bind(this);
+    return mutate(token, true, async (context, player, catalog) => {
       const previous = this.duplicate(player, id, requestHash); if (previous) return previous;
       if (command.type === 'catalog-save') {
         if (command.baseCatalogRevision !== catalog.revision) throw errorWithStatus('Der Katalog wurde inzwischen geändert. Lade den aktuellen Stand und versuche es erneut.', 409);
@@ -192,7 +318,7 @@ export class GameService {
       if (command.type === 'catalog-save') await context.setCatalog(player.world.catalog);
       this.remember(player, id, requestHash, { message: outcome.message }); this.metrics.acceptedCommands++;
       return { message: outcome.message };
-    }, clientId);
+    }, clientId, { ...options, duplicate: (_context, player) => this.duplicate(player, id, requestHash) });
   }
   async players(token) {
     return this.repository.read(async (context) => {
@@ -208,11 +334,19 @@ export class GameService {
       return { player: { id: player._id, name: player.name }, materials: summarizeMaterials(player.world), savedAt: player.lastSavedAt };
     });
   }
-  async gift(token, selection, clientId = selection?.clientId) {
+  async gift(token, selection, clientId = selection?.clientId, options = {}) {
     const id = commandId(selection?.commandId), { recipientId, cardId, split = true, takeAbove = true } = selection;
     if (typeof recipientId !== 'string' || recipientId.length > 100 || typeof cardId !== 'string' || cardId.length > 100 || typeof split !== 'boolean' || typeof takeAbove !== 'boolean') throw errorWithStatus('Das Geschenk ist ungültig.');
     const requestHash = signature({ kind: 'gift', recipientId, cardId, split, takeAbove });
-    return this.withWorld(token, true, async (context, player, _catalog, now) => {
+    const findDuplicate = async (context, player) => {
+      const previous = this.duplicate(player, id, requestHash); if (previous) return previous;
+      const existing = await context.giftByOperation(`${player._id}:${id}`);
+      if (!existing) return null;
+      if (existing.requestHash !== requestHash) throw errorWithStatus('Diese Aktions-ID wurde bereits verwendet.', 409);
+      return { message: existing.message, giftId: existing._id, duplicate: true };
+    };
+    const mutate = options.localSimulation ? this.withLocalWorld.bind(this) : this.withWorld.bind(this);
+    return mutate(token, true, async (context, player, _catalog, now) => {
       const previous = this.duplicate(player, id, requestHash); if (previous) return previous;
       const operationId = `${player._id}:${id}`, existing = await context.giftByOperation(operationId);
       if (existing) {
@@ -229,7 +363,7 @@ export class GameService {
       await context.updatePresence(recipient, { pendingGiftCount: (recipient.pendingGiftCount || 0) + 1 });
       this.remember(player, id, requestHash, { message, giftId }); this.metrics.giftsSent++;
       return { message, giftId };
-    }, clientId);
+    }, clientId, { ...options, duplicate: findDuplicate });
   }
   async presence(token, active = true, clientId) {
     const now = this.now();
@@ -237,7 +371,7 @@ export class GameService {
       const player = await this.requirePlayer(context, token, true), becameOnline = this.touch(player, now, active, clientId, false);
       const fields = { presenceUntil: player.presenceUntil, lastSeenAt: now, clients: player.clients, activeUntil: player.activeUntil };
       await context.updatePresence(player, fields);
-      return { player: profile(player), serverTime: now, hasPendingGifts: (player.pendingGiftCount || 0) > 0, ...(await this.presenceInfo(context, player._id, now)), becameOnline };
+      return { player: profile(player), serverTime: now, hasPendingGifts: (player.pendingGiftCount || 0) > 0, catalogRevision: await context.catalogRevision(), ...(await this.presenceInfo(context, player._id, now)), becameOnline };
     });
     return this.notifyOnline(result);
   }

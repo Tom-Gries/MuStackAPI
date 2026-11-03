@@ -37,6 +37,7 @@ export function mongoUpdate(before, after) {
 class FileContext {
   constructor(state) { this.state = state; }
   async catalog() { return clone(this.state.catalog); }
+  async catalogRevision() { return this.state.catalog.revision; }
   async setCatalog(catalog) { this.state.catalog = clone(catalog); }
   async playerByToken(hash) { return clone(Object.values(this.state.players).find((player) => player.tokenHashes.includes(hash)) || null); }
   async playerByName(nameKey) { return clone(Object.values(this.state.players).find((player) => player.nameKey === nameKey) || null); }
@@ -105,6 +106,7 @@ class MongoContext {
     return document.catalog;
   }
   async setCatalog(catalog) { await this.repository.catalogs.updateOne({ _id: 'global' }, { $set: { catalog, revision: catalog.revision } }, this.options); this.repository.metrics.writes++; }
+  async catalogRevision() { this.repository.metrics.reads++; const value = await this.repository.catalogs.findOne({ _id: 'global' }, { ...this.options, projection: { 'catalog.revision': 1 } }); return value.catalog.revision; }
   async remember(player) { if (player) this.before.set(player._id, clone(player)); return player; }
   async playerByToken(hash) { return this.remember(await this.one(this.repository.players, { tokenHashes: hash })); }
   async playerByName(nameKey) { return this.remember(await this.one(this.repository.players, { nameKey })); }

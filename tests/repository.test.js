@@ -56,7 +56,9 @@ test('Mongo heartbeat selects metadata only and world updates omit unchanged cat
   const service = await new GameService({ mode: 'cloud' }, { repository, now: () => 1000 }).init(); t.after(() => service.close());
   const a = await service.join('A'); client.calls = []; await service.presence(a.token);
   const read = client.calls.find((call) => call.name === 'personalPlayers' && call.method === 'findOne'); assert.equal(read.projection.world, 0);
-  assert.ok(client.calls.every((call) => call.name !== 'gameCatalog' && call.name !== 'personalGifts'));
+  assert.ok(client.calls.every((call) => call.name !== 'personalGifts'));
+  const catalogRead = client.calls.find((call) => call.name === 'gameCatalog');
+  assert.deepEqual(catalogRead.projection, { 'catalog.revision': 1 });
   client.calls = [];
   await service.execute(a.token, { type: 'move', cardId: a.player.cardId, x: 1000, y: 800 }, 'mongo-move-01');
   const update = client.calls.find((call) => call.name === 'personalPlayers' && call.method === 'updateOne').update;
