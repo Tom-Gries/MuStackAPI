@@ -16,7 +16,7 @@
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "@stackfriends/shared": "https://codeload.github.com/Tom-Gries/MuStackShared/tar.gz/cff669851dd304ec0f51d4804863f02d7d117575",
+    "@stackfriends/shared": "https://codeload.github.com/Tom-Gries/MuStackShared/tar.gz/a2b6f1ca111c5bd294f64f4724da5ed701003e0e",
     "cookie": "^1.0.2",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
