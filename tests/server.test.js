@@ -58,7 +58,7 @@ test('HTTP local load/save routes use the same cookie and return revision acks w
   const loaded = await (await post('/api/load', { simulation: 'local', clientId: 'browser-tab', clientEpoch: 1, active: true }, cookie)).json();
   assert.equal(loaded.world.clock.lastAt, state.world.clock.lastAt);
   assert.equal(loaded.world.revision, state.world.revision);
-  const body = { simulation: 'local', saveId: 'http-local-save', baseRevision: loaded.world.revision, operations: [{ kind: 'command', at: now(), activeUntil: now(), command: { type: 'move', cardId: state.player.cardId, x: 1000, y: 800 } }], clientId: 'browser-tab', clientEpoch: 1, active: true };
+  const body = { simulation: 'local', saveId: 'http-local-save', catalogContentVersion: loaded.world.catalog.contentVersion, baseRevision: loaded.world.revision, operations: [{ kind: 'command', at: now(), activeUntil: now(), command: { type: 'move', cardId: state.player.cardId, x: 1000, y: 800 } }], clientId: 'browser-tab', clientEpoch: 1, active: true };
   const response = await post('/api/save', body, cookie), saved = await response.json();
   assert.equal(response.status, 200);
   assert.equal(Object.hasOwn(saved, 'world'), false);
@@ -73,7 +73,7 @@ test('HTTP local load/save routes use the same cookie and return revision acks w
 test('HTTP stale local saves expose a safe conflict payload and protected mutations stay guarded', async (t) => {
   const { post, now } = await httpFixture(t), joined = await post('/api/join', { name: 'Browser', simulation: 'local' });
   const state = await joined.json(), cookie = joined.headers.get('set-cookie').split(';')[0];
-  const body = { simulation: 'local', saveId: 'http-first-save', baseRevision: state.world.revision, operations: [{ kind: 'advance', at: now(), activeUntil: now() }] };
+  const body = { simulation: 'local', saveId: 'http-first-save', catalogContentVersion: state.world.catalog.contentVersion, baseRevision: state.world.revision, operations: [{ kind: 'advance', at: now(), activeUntil: now() }] };
   assert.equal((await post('/api/save', body, cookie)).status, 200);
   const stale = await post('/api/save', { ...body, saveId: 'http-stale-save' }, cookie), error = await stale.json();
   assert.equal(stale.status, 409);

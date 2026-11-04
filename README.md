@@ -42,6 +42,10 @@ Beim Wiederöffnen werden begonnene Abbau- und Herstellungsarbeiten anhand der v
 
 Noch nicht bestätigte Aktionen liegen zusätzlich im Browser-Speicher. Ein Speicherpaket behält bei Wiederholungen dieselbe ID; Bestätigungen entfernen nur den bestätigten Journalanfang. Nach verlorener Antwort kann der verbleibende Teil wiederhergestellt werden. Basisrevisionen verhindern, dass eine alte Sitzung neuere Welten oder versandte Geschenke überschreibt. Ein fremder Versionskonflikt bewahrt die lokale Sicherung, statt sie still zu verwerfen.
 
+Neue Speicherpakete geben mit `catalogContentVersion` die Regelversion des Browsers an. Bei abweichenden Regeln fordert die API einen neuen Spielstand an, bevor sie das Journal verarbeitet; bereits bestätigte Speicher-IDs bleiben abrufbar. So werden ältere Browseraktionen nach einem Inhaltsupdate nicht unter geänderten Rezepten nachgerechnet.
+
+Kisten enthalten ihre eingelagerten Ressourcen und Nahrung als Teil des gespeicherten Weltstands. Die Materialübersicht zählt den Inhalt mit. Eine gefüllte Kiste muss vor dem Verschenken geleert werden; Katalogänderungen dürfen eingelagerte Kartentypen nicht entfernen.
+
 ## Daten und Editor
 
 MongoDB verwendet `personalPlayers`, `personalGifts` und den globalen Inhaltskatalog `gameCatalog`. Der Editor ändert weiterhin Karten, Rezepte und Pakete für alle Welten. Prüfungen berücksichtigen auch offline gespeicherte Welten und ausstehende Geschenke.

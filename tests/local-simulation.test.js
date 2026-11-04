@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { addCard, applyCommand } from '@stackfriends/shared/game.js';
 import { applySimulationOperation } from '@stackfriends/shared/local-simulation.js';
+import { DEFAULT_CATALOG } from '@stackfriends/shared/catalog.js';
 import { fixture, edit, hall } from './helpers/personal.js';
 
 const options = (baseRevision) => ({ localSimulation: true, baseRevision });
 const advanceOp = (at, activeUntil = at) => ({ kind: 'advance', at, activeUntil });
 const commandOp = (at, command) => ({ kind: 'command', at, activeUntil: at, command });
-const packet = (baseRevision, operations, saveId = 'local-save-001') => ({ baseRevision, operations, saveId, simulation: 'local' });
+const packet = (baseRevision, operations, saveId = 'local-save-001') => ({ baseRevision, operations, saveId, simulation: 'local', catalogContentVersion: DEFAULT_CATALOG.contentVersion });
 const human = (world) => world.cards.find((card) => card.type === 'human');
 const stored = (service, playerId) => service.repository.read((context) => context.playerById(playerId));
 
@@ -169,4 +170,25 @@ test('catalog changes reject old journals until explicit load reconciles the cur
   assert.equal(loaded.world.catalog.cardTypes.wood.name, 'Bauholz');
   const saved = await service.saveLocal(a.token, packet(loaded.world.revision, [advanceOp(now())], 'catalog-updated-save'));
   assert.equal(saved.catalogRevision, loaded.world.catalog.revision);
+});
+
+test('content upgrades reject unversioned or incompatible journals without replaying them; committed receipts still acknowledge', async (t) => {
+  const { service, now } = await fixture(t), a = await service.join('Alice', 'tab-a', options());
+  const operations = [commandOp(now(), { type: 'move', cardId: a.player.cardId, x: 1000, y: 600 })];
+  const current = DEFAULT_CATALOG.contentVersion, before = (await stored(service, a.player.id)).world;
+  for (const version of [undefined, current - 1, current + 1, String(current)]) {
+    const request = { ...packet(a.world.revision, operations, 'content-version-save'), catalogContentVersion: version };
+    await assert.rejects(service.saveLocal(a.token, request), (error) => {
+      assert.equal(error.status, 409); assert.equal(error.details.code, 'CATALOG_CHANGED');
+      assert.equal(error.details.catalog.contentVersion, current);
+      assert.equal(error.details.world.id, a.player.id);
+      return true;
+    });
+    assert.deepEqual((await stored(service, a.player.id)).world, before);
+  }
+  const request = packet(a.world.revision, operations, 'content-version-save');
+  const saved = await service.saveLocal(a.token, request);
+  const duplicate = await service.saveLocal(a.token, { ...request, catalogContentVersion: undefined });
+  assert.equal(duplicate.duplicate, true); assert.equal(duplicate.revision, saved.revision);
+  assert.equal((await stored(service, a.player.id)).world.cards.find((card) => card.id === a.player.cardId).x, 1000);
 });

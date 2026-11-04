@@ -185,7 +185,10 @@ export class GameService {
       }
       this.requireRevision(player, packet.baseRevision);
       const catalog = await context.catalog();
-      if (getCatalog(player.world).revision !== catalog.revision) throw this.conflict(player, 'CATALOG_CHANGED', catalog);
+      // Content upgrades can add automatic recipes without changing an edited
+      // catalog's revision. Never replay an older browser's journal under those
+      // new rules. Committed duplicate receipts above remain safe to acknowledge.
+      if (packet.catalogContentVersion !== catalog.contentVersion || getCatalog(player.world).revision !== catalog.revision) throw this.conflict(player, 'CATALOG_CHANGED', catalog);
       try { replaySimulationBatch(player.world, packet.operations, { playerId: player._id, maxTime: now + 5000 }); }
       catch (error) { if (!error.status) error.status = 400; throw error; }
       player.world.revision++; player.revision++; player.lastSavedAt = now; player.localSimulation = true;
